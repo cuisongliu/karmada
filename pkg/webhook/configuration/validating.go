@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package configuration
 
 import (
@@ -11,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/util/webhook"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
@@ -18,19 +35,18 @@ import (
 
 // ValidatingAdmission validates ResourceInterpreterWebhookConfiguration object when creating/updating.
 type ValidatingAdmission struct {
-	decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
 // Check if our ValidatingAdmission implements necessary interface
 var _ admission.Handler = &ValidatingAdmission{}
-var _ admission.DecoderInjector = &ValidatingAdmission{}
 
 // Handle implements admission.Handler interface.
 // It yields a response to an AdmissionRequest.
 func (v *ValidatingAdmission) Handle(_ context.Context, req admission.Request) admission.Response {
 	configuration := &configv1alpha1.ResourceInterpreterWebhookConfiguration{}
 
-	err := v.decoder.Decode(req, configuration)
+	err := v.Decoder.Decode(req, configuration)
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
@@ -53,13 +69,6 @@ func (v *ValidatingAdmission) Handle(_ context.Context, req admission.Request) a
 	}
 
 	return admission.Allowed("")
-}
-
-// InjectDecoder implements admission.DecoderInjector interface.
-// A decoder will be automatically injected.
-func (v *ValidatingAdmission) InjectDecoder(d *admission.Decoder) error {
-	v.decoder = d
-	return nil
 }
 
 var supportedInterpreterOperation = sets.NewString(
@@ -95,7 +104,19 @@ func validateWebhook(hook *configv1alpha1.ResourceInterpreterWebhook, fldPath *f
 	case cc.URL != nil:
 		allErrors = append(allErrors, webhook.ValidateWebhookURL(fldPath.Child("clientConfig").Child("url"), *cc.URL, true)...)
 	case cc.Service != nil:
-		allErrors = append(allErrors, webhook.ValidateWebhookService(fldPath.Child("clientConfig").Child("service"), cc.Service.Name, cc.Service.Namespace, cc.Service.Path, *cc.Service.Port)...)
+		// Temporary fix: If the service port is not specified, set a default value of 443.
+		// This is a workaround to prevent a panic when validating ResourceInterpreterWebhookConfiguration
+		// with an unspecified service port. Ideally, this logic should be handled by a MutatingWebhook,
+		// but introducing a MutatingWebhook at this stage would require significant changes and is not
+		// convenient for cherry-picking to release branches. Therefore, we are temporarily setting the
+		// default port here. Once a MutatingWebhook is implemented, this logic can be moved there.
+		//
+		// Note: The Interpreter framework also sets the same default value (443) when processing Service,
+		// so the backend will not encounter issues due to missing port information.
+		if cc.Service.Port == nil {
+			cc.Service.Port = ptr.To[int32](443)
+		}
+		allErrors = append(allErrors, webhook.ValidateWebhookService(fldPath.Child("clientConfig").Child("service"), cc.Service.Namespace, cc.Service.Name, cc.Service.Path, *cc.Service.Port)...)
 	}
 
 	allErrors = append(allErrors, validateInterpreterContextVersions(hook.InterpreterContextVersions, fldPath.Child("interpreterContextVersions"))...)

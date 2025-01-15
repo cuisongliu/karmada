@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package testing
 
 import (
@@ -14,7 +30,7 @@ import (
 
 // MockStore is a mock for store.Store interface
 type MockStore struct {
-	UpdateCacheFunc          func(resourcesByCluster map[string]map[schema.GroupVersionResource]*store.MultiNamespace) error
+	UpdateCacheFunc          func(resourcesByCluster map[string]map[schema.GroupVersionResource]*store.MultiNamespace, registeredResources map[schema.GroupVersionResource]struct{}) error
 	HasResourceFunc          func(resource schema.GroupVersionResource) bool
 	GetResourceFromCacheFunc func(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) (runtime.Object, string, error)
 	StopFunc                 func()
@@ -26,11 +42,11 @@ type MockStore struct {
 var _ store.Store = &MockStore{}
 
 // UpdateCache implements store.Store interface
-func (c *MockStore) UpdateCache(resourcesByCluster map[string]map[schema.GroupVersionResource]*store.MultiNamespace) error {
+func (c *MockStore) UpdateCache(resourcesByCluster map[string]map[schema.GroupVersionResource]*store.MultiNamespace, registeredResources map[schema.GroupVersionResource]struct{}) error {
 	if c.UpdateCacheFunc == nil {
 		panic("implement me")
 	}
-	return c.UpdateCacheFunc(resourcesByCluster)
+	return c.UpdateCacheFunc(resourcesByCluster, registeredResources)
 }
 
 // HasResource implements store.Store interface
@@ -81,4 +97,9 @@ func (c *MockStore) Watch(ctx context.Context, gvr schema.GroupVersionResource, 
 	}
 
 	return c.WatchFunc(ctx, gvr, options)
+}
+
+// ReadinessCheck checks if the storage is ready for accepting requests.
+func (c *MockStore) ReadinessCheck() error {
+	return nil
 }

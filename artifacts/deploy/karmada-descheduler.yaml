@@ -25,8 +25,12 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - /bin/karmada-descheduler
-            - --kubeconfig=/etc/kubeconfig
-            - --bind-address=0.0.0.0
+            - --kubeconfig=/etc/karmada/config/karmada.config
+            - --metrics-bind-address=0.0.0.0:8080
+            - --health-probe-bind-address=0.0.0.0:10358
+            - --scheduler-estimator-ca-file=/etc/karmada/pki/scheduler-estimator-client/ca.crt
+            - --scheduler-estimator-cert-file=/etc/karmada/pki/scheduler-estimator-client/tls.crt
+            - --scheduler-estimator-key-file=/etc/karmada/pki/scheduler-estimator-client/tls.key
             - --v=4
           livenessProbe:
             httpGet:
@@ -37,11 +41,20 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 15
             timeoutSeconds: 5
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
           volumeMounts:
-            - name: kubeconfig
-              subPath: kubeconfig
-              mountPath: /etc/kubeconfig
+            - name: karmada-config
+              mountPath: /etc/karmada/config
+            - name: scheduler-estimator-client-cert
+              mountPath: /etc/karmada/pki/scheduler-estimator-client
+              readOnly: true
       volumes:
-        - name: kubeconfig
+        - name: karmada-config
           secret:
-            secretName: kubeconfig
+            secretName: karmada-descheduler-config
+        - name: scheduler-estimator-client-cert
+          secret:
+            secretName: karmada-descheduler-scheduler-estimator-client-cert

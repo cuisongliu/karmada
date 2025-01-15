@@ -1,22 +1,42 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package validation
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/go-openapi/jsonpointer"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/util"
 )
-
-// LabelValueMaxLength is a label's max length
-const LabelValueMaxLength int = 63
 
 // ValidatePropagationSpec validates a PropagationSpec before creation or update.
 func ValidatePropagationSpec(spec policyv1alpha1.PropagationSpec) field.ErrorList {
@@ -26,7 +46,39 @@ func ValidatePropagationSpec(spec policyv1alpha1.PropagationSpec) field.ErrorLis
 		allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("propagateDeps"), spec.PropagateDeps, "application failover is set, propagateDeps must be true"))
 	}
 	allErrs = append(allErrs, ValidateFailover(spec.Failover, field.NewPath("spec").Child("failover"))...)
+	allErrs = append(allErrs, validateResourceSelectorsIfPreemptionEnabled(spec, field.NewPath("spec").Child("resourceSelectors"))...)
+	allErrs = append(allErrs, validateSuspension(spec.Suspension, field.NewPath("spec").Child("suspension"))...)
 	return allErrs
+}
+
+// validateResourceSelectorsIfPreemptionEnabled validates ResourceSelectors if Preemption is Always.
+func validateResourceSelectorsIfPreemptionEnabled(spec policyv1alpha1.PropagationSpec, fldPath *field.Path) field.ErrorList {
+	if spec.Preemption != policyv1alpha1.PreemptAlways {
+		return nil
+	}
+
+	var allErrs field.ErrorList
+	for index, resourceSelector := range spec.ResourceSelectors {
+		if len(resourceSelector.Name) == 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath.Index(index).Child("name"), resourceSelector.Name, "name cannot be empty if preemption is Always, the empty name may cause unexpected resources preemption"))
+		}
+	}
+	return allErrs
+}
+
+// validateSuspension validates no conflicts between dispatching and dispatchingOnClusters.
+func validateSuspension(suspension *policyv1alpha1.Suspension, fldPath *field.Path) field.ErrorList {
+	if suspension == nil {
+		return nil
+	}
+
+	if (suspension.Dispatching != nil && *suspension.Dispatching) &&
+		(suspension.DispatchingOnClusters != nil && len(suspension.DispatchingOnClusters.ClusterNames) > 0) {
+		return field.ErrorList{
+			field.Invalid(fldPath.Child("suspension"), suspension, "suspension dispatching cannot co-exist with dispatchingOnClusters.clusterNames"),
+		}
+	}
+	return nil
 }
 
 // ValidatePlacement validates a placement before creation or update.
@@ -34,7 +86,7 @@ func ValidatePlacement(placement policyv1alpha1.Placement, fldPath *field.Path) 
 	var allErrs field.ErrorList
 
 	if placement.ClusterAffinity != nil && placement.ClusterAffinities != nil {
-		allErrs = append(allErrs, field.Invalid(fldPath, placement, "clusterAffinities can not co-exist with clusterAffinity"))
+		allErrs = append(allErrs, field.Invalid(fldPath, placement, "clusterAffinities cannot co-exist with clusterAffinity"))
 	}
 
 	allErrs = append(allErrs, ValidateClusterAffinity(placement.ClusterAffinity, fldPath.Child("clusterAffinity"))...)
@@ -62,17 +114,17 @@ func ValidateClusterAffinities(affinities []policyv1alpha1.ClusterAffinityTerm, 
 	var allErrs field.ErrorList
 
 	affinityNames := make(map[string]bool)
-	for index, term := range affinities {
-		for _, err := range validation.IsQualifiedName(term.AffinityName) {
-			allErrs = append(allErrs, field.Invalid(fldPath.Index(index), term.AffinityName, err))
+	for index := range affinities {
+		for _, err := range validation.IsQualifiedName(affinities[index].AffinityName) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Index(index), affinities[index].AffinityName, err))
 		}
-		if _, exist := affinityNames[term.AffinityName]; exist {
+		if _, exist := affinityNames[affinities[index].AffinityName]; exist {
 			allErrs = append(allErrs, field.Invalid(fldPath, affinities, "each affinity term in a policy must have a unique name"))
 		} else {
-			affinityNames[term.AffinityName] = true
+			affinityNames[affinities[index].AffinityName] = true
 		}
 
-		allErrs = append(allErrs, ValidateClusterAffinity(&term.ClusterAffinity, fldPath.Index(index))...)
+		allErrs = append(allErrs, ValidateClusterAffinity(&affinities[index].ClusterAffinity, fldPath.Index(index))...)
 	}
 	return allErrs
 }
@@ -128,12 +180,12 @@ func ValidateSpreadConstraint(spreadConstraints []policyv1alpha1.SpreadConstrain
 
 		if len(constraint.SpreadByField) > 0 {
 			marked := spreadByFieldsWithErrorMark[constraint.SpreadByField]
-			if !pointer.BoolDeref(marked, true) {
+			if !ptr.Deref[bool](marked, true) {
 				allErrs = append(allErrs, field.Invalid(fldPath, spreadConstraints, fmt.Sprintf("multiple %s spread constraints are not allowed", constraint.SpreadByField)))
 				*marked = true
 			}
 			if marked == nil {
-				spreadByFieldsWithErrorMark[constraint.SpreadByField] = pointer.Bool(false)
+				spreadByFieldsWithErrorMark[constraint.SpreadByField] = ptr.To[bool](false)
 			}
 		}
 	}
@@ -259,13 +311,152 @@ func ValidateOverrideRules(overrideRules []policyv1alpha1.RuleWithCluster, fldPa
 		// validates predicate path.
 		for imageIndex, image := range rule.Overriders.ImageOverrider {
 			imagePath := rulePath.Child("overriders").Child("imageOverrider").Index(imageIndex)
-			if image.Predicate != nil && !strings.HasPrefix(image.Predicate.Path, "/") {
-				allErrs = append(allErrs, field.Invalid(imagePath.Child("predicate").Child("path"), image.Predicate.Path, "path should be start with / character"))
+			if image.Predicate != nil {
+				if _, err := jsonpointer.New(image.Predicate.Path); err != nil {
+					allErrs = append(allErrs, field.Invalid(imagePath.Child("predicate").Child("path"), image.Predicate.Path, err.Error()))
+				}
 			}
+		}
+
+		for fieldIndex, fieldOverrider := range rule.Overriders.FieldOverrider {
+			fieldPath := rulePath.Child("overriders").Child("fieldOverrider").Index(fieldIndex)
+			// validates that either YAML or JSON is selected for each field overrider.
+			if len(fieldOverrider.YAML) > 0 && len(fieldOverrider.JSON) > 0 {
+				allErrs = append(allErrs, field.Invalid(fieldPath, fieldOverrider, "FieldOverrider has both YAML and JSON set. Only one is allowed"))
+			}
+			// validates the field path.
+			if _, err := jsonpointer.New(fieldOverrider.FieldPath); err != nil {
+				allErrs = append(allErrs, field.Invalid(fieldPath.Child("fieldPath"), fieldOverrider.FieldPath, err.Error()))
+			}
+			// validates the JSON patch operations sub path.
+			allErrs = append(allErrs, validateJSONPatchSubPaths(fieldOverrider.JSON, fieldPath.Child("json"))...)
+			// validates the YAML patch operations sub path.
+			allErrs = append(allErrs, validateYAMLPatchSubPaths(fieldOverrider.YAML, fieldPath.Child("yaml"))...)
 		}
 
 		// validates the targetCluster.
 		allErrs = append(allErrs, ValidateClusterAffinity(rule.TargetCluster, rulePath.Child("targetCluster"))...)
 	}
 	return allErrs
+}
+
+func validateJSONPatchSubPaths(patches []policyv1alpha1.JSONPatchOperation, fieldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	for index, patch := range patches {
+		patchPath := fieldPath.Index(index)
+		if _, err := jsonpointer.New(patch.SubPath); err != nil {
+			allErrs = append(allErrs, field.Invalid(patchPath.Child("subPath"), patch.SubPath, err.Error()))
+		}
+		allErrs = append(allErrs, validateOverrideOperator(patch.Operator, patch.Value, patchPath.Child("value"))...)
+	}
+	return allErrs
+}
+
+func validateYAMLPatchSubPaths(patches []policyv1alpha1.YAMLPatchOperation, fieldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	for index, patch := range patches {
+		patchPath := fieldPath.Index(index)
+		if _, err := jsonpointer.New(patch.SubPath); err != nil {
+			allErrs = append(allErrs, field.Invalid(patchPath.Child("subPath"), patch.SubPath, err.Error()))
+		}
+		allErrs = append(allErrs, validateOverrideOperator(patch.Operator, patch.Value, patchPath.Child("value"))...)
+	}
+	return allErrs
+}
+
+func validateOverrideOperator(operator policyv1alpha1.OverriderOperator, value apiextensionsv1.JSON, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	switch operator {
+	case policyv1alpha1.OverriderOpAdd, policyv1alpha1.OverriderOpReplace:
+		if value.Size() == 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath, value, "value is required for add or replace operation"))
+		}
+	case policyv1alpha1.OverriderOpRemove:
+		if value.Size() != 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath, value, "value is not allowed for remove operation"))
+		}
+	}
+	return allErrs
+}
+
+// CrdsArchive defines the expected tar archive.
+var CrdsArchive = []string{"crds", "crds/bases", "crds/patches"}
+
+// ValidateTarball opens a .tar.gz file, and validates each
+// entry in the tar archive using a provided validate function.
+func ValidateTarball(tarball string, validate func(*tar.Header) error) error {
+	r, err := os.Open(tarball)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	gr, err := gzip.NewReader(r)
+	if err != nil {
+		return fmt.Errorf("new reader failed. %v", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	for {
+		header, err := tr.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		if err = validate(header); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ValidateCrdsTarBall checks if the CRDs package complies with file specifications.
+// It verifies the following:
+// 1. Whether the path is clean.
+// 2. Whether the file directory structure meets expectations.
+func ValidateCrdsTarBall(header *tar.Header) error {
+	switch header.Typeflag {
+	case tar.TypeDir:
+		// in Unix-like systems, directory paths in tar archives end with a slash (/) to distinguish them from file paths.
+		if strings.HasSuffix(header.Name, "/") && len(header.Name) > 1 {
+			if !isCleanPath(header.Name[:len(header.Name)-1]) {
+				return fmt.Errorf("the given file contains unclean file dir: %s", header.Name)
+			}
+		} else {
+			if !isCleanPath(header.Name) {
+				return fmt.Errorf("the given file contains unclean file dir: %s", header.Name)
+			}
+		}
+		if !isExpectedPath(header.Name, CrdsArchive) {
+			return fmt.Errorf("the given file contains unexpected file dir: %s", header.Name)
+		}
+	case tar.TypeReg:
+		if !isCleanPath(header.Name) {
+			return fmt.Errorf("the given file contains unclean file path: %s", header.Name)
+		}
+		if !isExpectedPath(header.Name, CrdsArchive) {
+			return fmt.Errorf("the given file contains unexpected file path: %s", header.Name)
+		}
+	default:
+		return fmt.Errorf("unknown type: %v in %s", header.Typeflag, header.Name)
+	}
+	return nil
+}
+
+func isExpectedPath(path string, expectedDirs []string) bool {
+	for _, dir := range expectedDirs {
+		if path == dir || strings.HasPrefix(path, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func isCleanPath(path string) bool {
+	return path == filepath.Clean(path)
 }

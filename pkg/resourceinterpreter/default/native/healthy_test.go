@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package native
 
 import (
@@ -5,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func Test_interpretDeploymentHealth(t *testing.T) {
@@ -352,7 +369,7 @@ func Test_interpretDaemonSetHealth(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "updatedNumberScheduled < desiredNumberSchedulerd",
+			name: "updatedNumberScheduled < desiredNumberScheduled",
 			object: &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"status": map[string]interface{}{
@@ -686,6 +703,7 @@ func Test_interpretPodHealth(t *testing.T) {
 		})
 	}
 }
+
 func Test_interpretPodDisruptionBudgetHealth(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -736,5 +754,32 @@ func Test_interpretPodDisruptionBudgetHealth(t *testing.T) {
 				t.Errorf("interpretPodDisruptionBudgetHealth() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func Test_getAllDefaultHealthInterpreter(t *testing.T) {
+	expectedKinds := []schema.GroupVersionKind{
+		{Group: "apps", Version: "v1", Kind: "Deployment"},
+		{Group: "apps", Version: "v1", Kind: "StatefulSet"},
+		{Group: "apps", Version: "v1", Kind: "ReplicaSet"},
+		{Group: "apps", Version: "v1", Kind: "DaemonSet"},
+		{Group: "", Version: "v1", Kind: "Service"},
+		{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress"},
+		{Group: "", Version: "v1", Kind: "PersistentVolumeClaim"},
+		{Group: "", Version: "v1", Kind: "Pod"},
+		{Group: "policy", Version: "v1", Kind: "PodDisruptionBudget"},
+	}
+
+	got := getAllDefaultHealthInterpreter()
+
+	if len(got) != len(expectedKinds) {
+		t.Errorf("getAllDefaultHealthInterpreter() length = %d, want %d", len(got), len(expectedKinds))
+	}
+
+	for _, key := range expectedKinds {
+		_, exists := got[key]
+		if !exists {
+			t.Errorf("getAllDefaultHealthInterpreter() missing key %v", key)
+		}
 	}
 }

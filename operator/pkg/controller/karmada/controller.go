@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package karmada
 
 import (
@@ -24,7 +40,7 @@ import (
 )
 
 const (
-	// ControllerName is the controller name that will be used when reporting events.
+	// ControllerName is the controller name that will be used when reporting events and metrics.
 	ControllerName = "karmada-operator-controller"
 
 	// ControllerFinalizerName is the name of the karmada controller finalizer
@@ -32,6 +48,9 @@ const (
 
 	// DisableCascadingDeletionLabel is the label that determine whether to perform cascade deletion
 	DisableCascadingDeletionLabel = "operator.karmada.io/disable-cascading-deletion"
+
+	// ValidationErrorReason is the reason for a validation error
+	ValidationErrorReason = "ValidationError"
 )
 
 // Controller controls the Karmada resource.
@@ -73,6 +92,11 @@ func (ctrl *Controller) Reconcile(ctx context.Context, req controllerruntime.Req
 		return ctrl.removeFinalizer(ctx, karmada)
 	}
 
+	if err := ctrl.validateKarmada(ctx, karmada); err != nil {
+		klog.Errorf("Validation failed for karmada: %+v", err)
+		return controllerruntime.Result{}, nil
+	}
+
 	if err := ctrl.ensureKarmada(ctx, karmada); err != nil {
 		return controllerruntime.Result{}, err
 	}
@@ -111,7 +135,8 @@ func (ctrl *Controller) ensureKarmada(ctx context.Context, karmada *operatorv1al
 	// registering our finalizer.
 	updated := controllerutil.AddFinalizer(karmada, ControllerFinalizerName)
 	if _, isExist := karmada.Labels[DisableCascadingDeletionLabel]; !isExist {
-		karmada.SetLabels(labels.Set{DisableCascadingDeletionLabel: "false"})
+		labelMap := labels.Merge(karmada.GetLabels(), labels.Set{DisableCascadingDeletionLabel: "false"})
+		karmada.SetLabels(labelMap)
 		updated = true
 	}
 
@@ -130,6 +155,7 @@ func (ctrl *Controller) ensureKarmada(ctx context.Context, karmada *operatorv1al
 // SetupWithManager creates a controller and register to controller manager.
 func (ctrl *Controller) SetupWithManager(mgr controllerruntime.Manager) error {
 	return controllerruntime.NewControllerManagedBy(mgr).
+		Named(ControllerName).
 		For(&operatorv1alpha1.Karmada{},
 			builder.WithPredicates(predicate.Funcs{
 				UpdateFunc: ctrl.onKarmadaUpdate,

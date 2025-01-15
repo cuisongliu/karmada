@@ -28,6 +28,8 @@ spec:
     spec:
       {{- include "karmada.apiServer.imagePullSecrets" . | nindent 6 }}
       automountServiceAccountToken: false
+      initContainers:
+        {{- include "karmada.initContainer.waitEtcd" . | nindent 8 }}
       containers:
         - name: {{ $name }}-apiserver
           image: {{ template "karmada.apiServer.image" . }}
@@ -53,15 +55,12 @@ spec:
             - --etcd-servers=https://etcd-client.{{ include "karmada.namespace" . }}.svc.{{ .Values.clusterDomain }}:2379
             {{- end }}
             - --bind-address=0.0.0.0
-            - --kubelet-client-certificate=/etc/kubernetes/pki/karmada.crt
-            - --kubelet-client-key=/etc/kubernetes/pki/karmada.key
-            - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
             - --runtime-config=
             - --secure-port=5443
             - --service-account-issuer=https://kubernetes.default.svc.{{ .Values.clusterDomain }}
             - --service-account-key-file=/etc/kubernetes/pki/karmada.key
             - --service-account-signing-key-file=/etc/kubernetes/pki/karmada.key
-            - --service-cluster-ip-range=10.96.0.0/12
+            - --service-cluster-ip-range={{ .Values.apiServer.serviceClusterIPRange }}
             - --proxy-client-cert-file=/etc/kubernetes/pki/front-proxy-client.crt
             - --proxy-client-key-file=/etc/kubernetes/pki/front-proxy-client.key
             - --requestheader-allowed-names=front-proxy-client
@@ -73,6 +72,7 @@ spec:
             - --tls-private-key-file=/etc/kubernetes/pki/karmada.key
             - --max-requests-inflight={{ .Values.apiServer.maxRequestsInflight }}
             - --max-mutating-requests-inflight={{ .Values.apiServer.maxMutatingRequestsInflight }}
+            - --tls-min-version=VersionTLS13
           ports:
             - name: http
               containerPort: 5443
@@ -169,5 +169,21 @@ spec:
       targetPort: 5443
   selector:
   {{- include "karmada.apiserver.labels" . | nindent 4}}
+
+{{ if .Values.apiServer.podDisruptionBudget }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-apiserver
+  namespace: {{ include "karmada.namespace" . }}
+  labels:
+    {{- include "karmada.apiserver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "karmada.apiserver.labels" . | nindent 6}}
+  {{ toYaml .Values.apiServer.podDisruptionBudget | nindent 2 }}
+{{- end -}}
 
 {{- end }}

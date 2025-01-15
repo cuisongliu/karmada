@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package overridemanager
 
 import (
@@ -244,13 +260,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandDeploymentYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "add",
+					Operator:      policyv1alpha1.OverriderOpAdd,
 					Value:         []string{"&& echo 'hello karmada'"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v", "-t", "&& echo 'hello karmada'"},
 				},
@@ -262,13 +278,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandDeploymentYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "remove",
+					Operator:      policyv1alpha1.OverriderOpRemove,
 					Value:         []string{"-t"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v"},
 				},
@@ -280,13 +296,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandDeploymentYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "remove",
+					Operator:      policyv1alpha1.OverriderOpRemove,
 					Value:         []string{},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v", "-t"},
 				},
@@ -298,13 +314,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandDeploymentYamlWithTwoContainer(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "add",
+					Operator:      policyv1alpha1.OverriderOpAdd,
 					Value:         []string{"echo 'hello karmada'"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v", "-t", "echo 'hello karmada'"},
 				},
@@ -316,13 +332,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandDeploymentYamlWithTwoContainer(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "remove",
+					Operator:      policyv1alpha1.OverriderOpRemove,
 					Value:         []string{"-t"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v"},
 				},
@@ -334,13 +350,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandPodYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "add",
+					Operator:      policyv1alpha1.OverriderOpAdd,
 					Value:         []string{"echo 'hello karmada'"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/containers/0/command",
 					Value: []string{"nginx", "-v", "-t", "echo 'hello karmada'"},
 				},
@@ -352,13 +368,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandStatefulSetYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "add",
+					Operator:      policyv1alpha1.OverriderOpAdd,
 					Value:         []string{"echo 'hello karmada'"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v", "-t", "echo 'hello karmada'"},
 				},
@@ -370,13 +386,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandReplicaSetYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "remove",
+					Operator:      policyv1alpha1.OverriderOpRemove,
 					Value:         []string{"-t"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v"},
 				},
@@ -388,13 +404,13 @@ func TestParseJSONPatchesByCommandOverrider(t *testing.T) {
 				rawObj: generateTestCommandDaemonSetYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "remove",
+					Operator:      policyv1alpha1.OverriderOpRemove,
 					Value:         []string{"-t"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/command",
 					Value: []string{"nginx", "-v"},
 				},
@@ -433,13 +449,13 @@ func TestParseJSONPatchesByArgsOverrider(t *testing.T) {
 				rawObj: generateTestArgsDeploymentYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "add",
+					Operator:      policyv1alpha1.OverriderOpAdd,
 					Value:         []string{"&& echo 'hello karmada'"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/args",
 					Value: []string{"nginx", "-v", "-t", "&& echo 'hello karmada'"},
 				},
@@ -451,13 +467,13 @@ func TestParseJSONPatchesByArgsOverrider(t *testing.T) {
 				rawObj: generateTestArgsDeploymentYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "remove",
+					Operator:      policyv1alpha1.OverriderOpRemove,
 					Value:         []string{"-t"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "replace",
+					Op:    string(policyv1alpha1.OverriderOpReplace),
 					Path:  "/spec/template/spec/containers/0/args",
 					Value: []string{"nginx", "-v"},
 				},
@@ -469,13 +485,13 @@ func TestParseJSONPatchesByArgsOverrider(t *testing.T) {
 				rawObj: generateTestCommandDeploymentYaml(),
 				CommandArgsOverrider: &policyv1alpha1.CommandArgsOverrider{
 					ContainerName: "nginx",
-					Operator:      "add",
+					Operator:      policyv1alpha1.OverriderOpAdd,
 					Value:         []string{"-t"},
 				},
 			},
 			want: []overrideOption{
 				{
-					Op:    "add",
+					Op:    string(policyv1alpha1.OverriderOpAdd),
 					Path:  "/spec/template/spec/containers/0/args",
 					Value: []string{"-t"},
 				},

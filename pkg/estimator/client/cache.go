@@ -1,7 +1,24 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package client
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,7 +27,7 @@ import (
 	"k8s.io/klog/v2"
 
 	estimatorservice "github.com/karmada-io/karmada/pkg/estimator/service"
-	"github.com/karmada-io/karmada/pkg/util"
+	"github.com/karmada-io/karmada/pkg/util/grpcconnection"
 	"github.com/karmada-io/karmada/pkg/util/names"
 )
 
@@ -18,6 +35,13 @@ import (
 type SchedulerEstimatorCache struct {
 	lock      sync.RWMutex
 	estimator map[string]*clientWrapper
+}
+
+// SchedulerEstimatorServiceInfo contains information needed to discover and connect to a scheduler estimator service.
+type SchedulerEstimatorServiceInfo struct {
+	Name       string
+	NamePrefix string
+	Namespace  string
 }
 
 // NewSchedulerEstimatorCache returns an accurate scheduler estimator cache.
@@ -80,25 +104,25 @@ func (c *SchedulerEstimatorCache) GetClient(name string) (estimatorservice.Estim
 }
 
 // EstablishConnection establishes a new gRPC connection with the specified cluster scheduler estimator.
-func EstablishConnection(kubeClient kubernetes.Interface, name string, estimatorCache *SchedulerEstimatorCache, estimatorServicePrefix string, port int) error {
-	if estimatorCache.IsEstimatorExist(name) {
+func EstablishConnection(kubeClient kubernetes.Interface, serviceInfo SchedulerEstimatorServiceInfo, estimatorCache *SchedulerEstimatorCache, grpcConfig *grpcconnection.ClientConfig) error {
+	if estimatorCache.IsEstimatorExist(serviceInfo.Name) {
 		return nil
 	}
 
-	serverAddr, err := resolveCluster(kubeClient, util.NamespaceKarmadaSystem,
-		names.GenerateEstimatorServiceName(estimatorServicePrefix, name), int32(port))
+	serverAddrs, err := resolveCluster(kubeClient, serviceInfo.Namespace,
+		names.GenerateEstimatorServiceName(serviceInfo.NamePrefix, serviceInfo.Name), int32(grpcConfig.TargetPort))
 	if err != nil {
 		return err
 	}
 
-	klog.Infof("Start dialing estimator server(%s) of cluster(%s).", serverAddr, name)
-	cc, err := util.Dial(serverAddr, 5*time.Second)
+	klog.Infof("Start dialing estimator server(%s) of cluster(%s).", strings.Join(serverAddrs, ","), serviceInfo.Name)
+	cc, err := grpcConfig.DialWithTimeOut(serverAddrs, 5*time.Second)
 	if err != nil {
-		klog.Errorf("Failed to dial cluster(%s): %v.", name, err)
+		klog.Errorf("Failed to dial cluster(%s): %v.", serviceInfo.Name, err)
 		return err
 	}
 	c := estimatorservice.NewEstimatorClient(cc)
-	estimatorCache.AddCluster(name, cc, c)
-	klog.Infof("Connection with estimator server(%s) of cluster(%s) has been established.", serverAddr, name)
+	estimatorCache.AddCluster(serviceInfo.Name, cc, c)
+	klog.Infof("Connection with estimator server(%s) of cluster(%s) has been established.", cc.Target(), serviceInfo.Name)
 	return nil
 }

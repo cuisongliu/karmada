@@ -1,8 +1,25 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package helper
 
 import (
 	"context"
 	"reflect"
+	"sort"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	workv1alpha1 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
@@ -41,7 +59,8 @@ func TestDispenseReplicasByTargetClusters(t *testing.T) {
 	tests := []struct {
 		name string
 		args args
-		want []workv1alpha2.TargetCluster
+		// wants specifies multi possible desired result, any one got is expected
+		wants [][]workv1alpha2.TargetCluster
 	}{
 		{
 			name: "empty clusters",
@@ -49,7 +68,9 @@ func TestDispenseReplicasByTargetClusters(t *testing.T) {
 				clusters: []workv1alpha2.TargetCluster{},
 				sum:      10,
 			},
-			want: []workv1alpha2.TargetCluster{},
+			wants: [][]workv1alpha2.TargetCluster{
+				{},
+			},
 		},
 		{
 			name: "1 cluster, 5 replicas, 10 sum",
@@ -62,10 +83,12 @@ func TestDispenseReplicasByTargetClusters(t *testing.T) {
 				},
 				sum: 10,
 			},
-			want: []workv1alpha2.TargetCluster{
+			wants: [][]workv1alpha2.TargetCluster{
 				{
-					Name:     ClusterMember1,
-					Replicas: 10,
+					{
+						Name:     ClusterMember1,
+						Replicas: 10,
+					},
 				},
 			},
 		},
@@ -88,18 +111,20 @@ func TestDispenseReplicasByTargetClusters(t *testing.T) {
 				},
 				sum: 12,
 			},
-			want: []workv1alpha2.TargetCluster{
+			wants: [][]workv1alpha2.TargetCluster{
 				{
-					Name:     ClusterMember1,
-					Replicas: 4,
-				},
-				{
-					Name:     ClusterMember2,
-					Replicas: 4,
-				},
-				{
-					Name:     ClusterMember3,
-					Replicas: 4,
+					{
+						Name:     ClusterMember1,
+						Replicas: 4,
+					},
+					{
+						Name:     ClusterMember2,
+						Replicas: 4,
+					},
+					{
+						Name:     ClusterMember3,
+						Replicas: 4,
+					},
 				},
 			},
 		},
@@ -122,18 +147,48 @@ func TestDispenseReplicasByTargetClusters(t *testing.T) {
 				},
 				sum: 10,
 			},
-			want: []workv1alpha2.TargetCluster{
+			wants: [][]workv1alpha2.TargetCluster{
 				{
-					Name:     ClusterMember1,
-					Replicas: 4,
+					{
+						Name:     ClusterMember1,
+						Replicas: 4,
+					},
+					{
+						Name:     ClusterMember2,
+						Replicas: 3,
+					},
+					{
+						Name:     ClusterMember3,
+						Replicas: 3,
+					},
 				},
 				{
-					Name:     ClusterMember2,
-					Replicas: 3,
+					{
+						Name:     ClusterMember1,
+						Replicas: 3,
+					},
+					{
+						Name:     ClusterMember2,
+						Replicas: 4,
+					},
+					{
+						Name:     ClusterMember3,
+						Replicas: 3,
+					},
 				},
 				{
-					Name:     ClusterMember3,
-					Replicas: 3,
+					{
+						Name:     ClusterMember1,
+						Replicas: 3,
+					},
+					{
+						Name:     ClusterMember2,
+						Replicas: 3,
+					},
+					{
+						Name:     ClusterMember3,
+						Replicas: 4,
+					},
 				},
 			},
 		},
@@ -156,27 +211,33 @@ func TestDispenseReplicasByTargetClusters(t *testing.T) {
 				},
 				sum: 13,
 			},
-			want: []workv1alpha2.TargetCluster{
+			wants: [][]workv1alpha2.TargetCluster{
 				{
-					Name:     ClusterMember1,
-					Replicas: 2,
-				},
-				{
-					Name:     ClusterMember2,
-					Replicas: 4,
-				},
-				{
-					Name:     ClusterMember3,
-					Replicas: 7,
+					{
+						Name:     ClusterMember1,
+						Replicas: 2,
+					},
+					{
+						Name:     ClusterMember2,
+						Replicas: 4,
+					},
+					{
+						Name:     ClusterMember3,
+						Replicas: 7,
+					},
 				},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := SpreadReplicasByTargetClusters(tt.args.sum, tt.args.clusters, nil); !testhelper.IsScheduleResultEqual(got, tt.want) {
-				t.Errorf("SpreadReplicasByTargetClusters() = %v, want %v", got, tt.want)
+			got := SpreadReplicasByTargetClusters(tt.args.sum, tt.args.clusters, nil)
+			for _, want := range tt.wants {
+				if testhelper.IsScheduleResultEqual(got, want) {
+					return
+				}
 			}
+			t.Errorf("dynamicScaleUp() got = %v, wants %v", got, tt.wants)
 		})
 	}
 }
@@ -275,6 +336,36 @@ func TestObtainBindingSpecExistingClusters(t *testing.T) {
 			},
 			want: sets.New("member1", "member2", "member3"),
 		},
+		{
+			name: "unique cluster names with GracefulEvictionTasks with PurgeMode Immediately",
+			bindingSpec: workv1alpha2.ResourceBindingSpec{
+				Clusters: []workv1alpha2.TargetCluster{
+					{
+						Name:     "member1",
+						Replicas: 2,
+					},
+					{
+						Name:     "member2",
+						Replicas: 3,
+					},
+				},
+				GracefulEvictionTasks: []workv1alpha2.GracefulEvictionTask{
+					{
+						FromCluster: "member3",
+						PurgeMode:   policyv1alpha1.Immediately,
+					},
+					{
+						FromCluster: "member4",
+						PurgeMode:   policyv1alpha1.Graciously,
+					},
+					{
+						FromCluster: "member5",
+						PurgeMode:   policyv1alpha1.Never,
+					},
+				},
+			},
+			want: sets.New("member1", "member2", "member4", "member5"),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -283,6 +374,18 @@ func TestObtainBindingSpecExistingClusters(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sortClusterByWeight sort clusters by the weight
+func sortClusterByWeight(m map[string]int64) ClusterWeightInfoList {
+	p := make(ClusterWeightInfoList, len(m))
+	i := 0
+	for k, v := range m {
+		p[i] = ClusterWeightInfo{ClusterName: k, Weight: v}
+		i++
+	}
+	sort.Sort(p)
+	return p
 }
 
 func TestSortClusterByWeight(t *testing.T) {
@@ -315,24 +418,18 @@ func TestSortClusterByWeight(t *testing.T) {
 					"cluster11": 1,
 					"cluster12": 2,
 					"cluster13": 3,
-					"cluster21": 1,
-					"cluster22": 2,
-					"cluster23": 3,
 				},
 			},
 			want: []ClusterWeightInfo{
 				{ClusterName: "cluster13", Weight: 3},
-				{ClusterName: "cluster23", Weight: 3},
 				{ClusterName: "cluster12", Weight: 2},
-				{ClusterName: "cluster22", Weight: 2},
 				{ClusterName: "cluster11", Weight: 1},
-				{ClusterName: "cluster21", Weight: 1},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := SortClusterByWeight(tt.args.m); !reflect.DeepEqual(got, tt.want) {
+			if got := sortClusterByWeight(tt.args.m); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("SortClusterByWeight() = %v, want %v", got, tt.want)
 			}
 		})
@@ -344,6 +441,7 @@ func TestFindOrphanWorks(t *testing.T) {
 		c                client.Client
 		bindingNamespace string
 		bindingName      string
+		bindingID        string
 		expectClusters   sets.Set[string]
 	}
 	tests := []struct {
@@ -362,17 +460,18 @@ func TestFindOrphanWorks(t *testing.T) {
 							Namespace:       "wrong format",
 							ResourceVersion: "999",
 							Labels: map[string]string{
-								workv1alpha2.ResourceBindingReferenceKey: names.GenerateBindingReferenceKey("default", "binding"),
-							},
-							Annotations: map[string]string{
-								workv1alpha2.ResourceBindingNamespaceAnnotationKey: "default",
-								workv1alpha2.ResourceBindingNameAnnotationKey:      "binding",
+								workv1alpha2.ResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 							},
 						},
 					},
+				).WithIndex(
+					&workv1alpha1.Work{},
+					workv1alpha2.ResourceBindingPermanentIDLabel,
+					IndexerFuncBasedOnLabel(workv1alpha2.ResourceBindingPermanentIDLabel),
 				).Build(),
 				bindingNamespace: "default",
 				bindingName:      "binding",
+				bindingID:        "3617252f-b1bb-43b0-98a1-c7de833c472c",
 				expectClusters:   sets.New("clusterx"),
 			},
 			want:    nil,
@@ -388,11 +487,7 @@ func TestFindOrphanWorks(t *testing.T) {
 							Namespace:       names.ExecutionSpacePrefix + "cluster1",
 							ResourceVersion: "999",
 							Labels: map[string]string{
-								workv1alpha2.ResourceBindingReferenceKey: names.GenerateBindingReferenceKey("default", "binding"),
-							},
-							Annotations: map[string]string{
-								workv1alpha2.ResourceBindingNamespaceAnnotationKey: "default",
-								workv1alpha2.ResourceBindingNameAnnotationKey:      "binding",
+								workv1alpha2.ResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 							},
 						},
 					},
@@ -410,31 +505,22 @@ func TestFindOrphanWorks(t *testing.T) {
 					},
 					&workv1alpha1.Work{
 						ObjectMeta: metav1.ObjectMeta{
-							Name:            "not-selected-because-of-annotation",
-							Namespace:       names.ExecutionSpacePrefix + "cluster1",
-							ResourceVersion: "999",
-							Labels: map[string]string{
-								workv1alpha2.ResourceBindingReferenceKey: names.GenerateBindingReferenceKey("default", "binding"),
-							},
-						},
-					},
-					&workv1alpha1.Work{
-						ObjectMeta: metav1.ObjectMeta{
 							Name:            "not-selected-because-of-cluster",
 							Namespace:       names.ExecutionSpacePrefix + "clusterx",
 							ResourceVersion: "999",
 							Labels: map[string]string{
-								workv1alpha2.ResourceBindingReferenceKey: names.GenerateBindingReferenceKey("default", "binding"),
-							},
-							Annotations: map[string]string{
-								workv1alpha2.ResourceBindingNamespaceAnnotationKey: "default",
-								workv1alpha2.ResourceBindingNameAnnotationKey:      "binding",
+								workv1alpha2.ResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 							},
 						},
 					},
+				).WithIndex(
+					&workv1alpha1.Work{},
+					workv1alpha2.ResourceBindingPermanentIDLabel,
+					IndexerFuncBasedOnLabel(workv1alpha2.ResourceBindingPermanentIDLabel),
 				).Build(),
 				bindingNamespace: "default",
 				bindingName:      "binding",
+				bindingID:        "3617252f-b1bb-43b0-98a1-c7de833c472c",
 				expectClusters:   sets.New("clusterx"),
 			},
 			want: []workv1alpha1.Work{
@@ -444,11 +530,7 @@ func TestFindOrphanWorks(t *testing.T) {
 						Namespace:       names.ExecutionSpacePrefix + "cluster1",
 						ResourceVersion: "999",
 						Labels: map[string]string{
-							workv1alpha2.ResourceBindingReferenceKey: names.GenerateBindingReferenceKey("default", "binding"),
-						},
-						Annotations: map[string]string{
-							workv1alpha2.ResourceBindingNamespaceAnnotationKey: "default",
-							workv1alpha2.ResourceBindingNameAnnotationKey:      "binding",
+							workv1alpha2.ResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 						},
 					},
 				},
@@ -465,10 +547,7 @@ func TestFindOrphanWorks(t *testing.T) {
 							Namespace:       names.ExecutionSpacePrefix + "cluster1",
 							ResourceVersion: "999",
 							Labels: map[string]string{
-								workv1alpha2.ClusterResourceBindingReferenceKey: names.GenerateBindingReferenceKey("", "binding"),
-							},
-							Annotations: map[string]string{
-								workv1alpha2.ClusterResourceBindingAnnotationKey: "binding",
+								workv1alpha2.ClusterResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 							},
 						},
 					},
@@ -478,19 +557,6 @@ func TestFindOrphanWorks(t *testing.T) {
 							Namespace:       names.ExecutionSpacePrefix + "cluster1",
 							ResourceVersion: "999",
 							Labels:          map[string]string{},
-							Annotations: map[string]string{
-								workv1alpha2.ClusterResourceBindingAnnotationKey: "binding",
-							},
-						},
-					},
-					&workv1alpha1.Work{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:            "not-selected-because-of-annotation",
-							Namespace:       names.ExecutionSpacePrefix + "cluster1",
-							ResourceVersion: "999",
-							Labels: map[string]string{
-								workv1alpha2.ClusterResourceBindingReferenceKey: names.GenerateBindingReferenceKey("", "binding"),
-							},
 						},
 					},
 					&workv1alpha1.Work{
@@ -499,16 +565,18 @@ func TestFindOrphanWorks(t *testing.T) {
 							Namespace:       names.ExecutionSpacePrefix + "clusterx",
 							ResourceVersion: "999",
 							Labels: map[string]string{
-								workv1alpha2.ClusterResourceBindingReferenceKey: names.GenerateBindingReferenceKey("", "binding"),
-							},
-							Annotations: map[string]string{
-								workv1alpha2.ClusterResourceBindingAnnotationKey: "binding",
+								workv1alpha2.ClusterResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 							},
 						},
 					},
+				).WithIndex(
+					&workv1alpha1.Work{},
+					workv1alpha2.ClusterResourceBindingPermanentIDLabel,
+					IndexerFuncBasedOnLabel(workv1alpha2.ClusterResourceBindingPermanentIDLabel),
 				).Build(),
 				bindingNamespace: "",
 				bindingName:      "binding",
+				bindingID:        "3617252f-b1bb-43b0-98a1-c7de833c472c",
 				expectClusters:   sets.New("clusterx"),
 			},
 			want: []workv1alpha1.Work{
@@ -518,10 +586,7 @@ func TestFindOrphanWorks(t *testing.T) {
 						Namespace:       names.ExecutionSpacePrefix + "cluster1",
 						ResourceVersion: "999",
 						Labels: map[string]string{
-							workv1alpha2.ClusterResourceBindingReferenceKey: names.GenerateBindingReferenceKey("", "binding"),
-						},
-						Annotations: map[string]string{
-							workv1alpha2.ClusterResourceBindingAnnotationKey: "binding",
+							workv1alpha2.ClusterResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 						},
 					},
 				},
@@ -531,7 +596,7 @@ func TestFindOrphanWorks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := FindOrphanWorks(tt.args.c, tt.args.bindingNamespace, tt.args.bindingName, tt.args.expectClusters)
+			got, err := FindOrphanWorks(context.Background(), tt.args.c, tt.args.bindingNamespace, tt.args.bindingName, tt.args.bindingID, tt.args.expectClusters)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("FindOrphanWorks() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -586,7 +651,7 @@ func TestRemoveOrphanWorks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := RemoveOrphanWorks(tt.args.c, tt.args.works); (err != nil) != tt.wantErr {
+			if err := RemoveOrphanWorks(context.Background(), tt.args.c, tt.args.works); (err != nil) != tt.wantErr {
 				t.Errorf("RemoveOrphanWorks() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			got := &workv1alpha1.WorkList{}
@@ -784,7 +849,7 @@ func TestFetchWorkload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			stopCh := make(chan struct{})
 			mgr := tt.args.informerManager(stopCh)
-			got, err := FetchResourceTemplate(tt.args.dynamicClient, mgr, tt.args.restMapper, tt.args.resource)
+			got, err := FetchResourceTemplate(context.TODO(), tt.args.dynamicClient, mgr, tt.args.restMapper, tt.args.resource)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("FetchResourceTemplate() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -801,11 +866,160 @@ func TestFetchWorkload(t *testing.T) {
 	}
 }
 
+func TestFetchWorkloadByLabelSelector(t *testing.T) {
+	type args struct {
+		dynamicClient   dynamic.Interface
+		informerManager func(stopCh <-chan struct{}) genericmanager.SingleClusterInformerManager
+		restMapper      meta.RESTMapper
+		resource        workv1alpha2.ObjectReference
+		selector        *metav1.LabelSelector
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    int
+		wantErr bool
+	}{
+		{
+			name: "kind is not registered",
+			args: args{
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(scheme.Scheme),
+				informerManager: func(stopCh <-chan struct{}) genericmanager.SingleClusterInformerManager {
+					return genericmanager.NewSingleClusterInformerManager(dynamicfake.NewSimpleDynamicClient(scheme.Scheme), 0, stopCh)
+				},
+				restMapper: meta.NewDefaultRESTMapper(nil),
+				resource:   workv1alpha2.ObjectReference{APIVersion: "v1", Kind: "Pod"},
+			},
+			want:    0,
+			wantErr: true,
+		},
+		{
+			name: "namespace scope: get from client",
+			args: args{
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(scheme.Scheme,
+					&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default", Labels: map[string]string{"foo": "foo"}}}),
+				informerManager: func(stopCh <-chan struct{}) genericmanager.SingleClusterInformerManager {
+					return genericmanager.NewSingleClusterInformerManager(dynamicfake.NewSimpleDynamicClient(scheme.Scheme), 0, stopCh)
+				},
+				restMapper: func() meta.RESTMapper {
+					m := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+					m.Add(corev1.SchemeGroupVersion.WithKind("Pod"), meta.RESTScopeNamespace)
+					return m
+				}(),
+				resource: workv1alpha2.ObjectReference{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Namespace:  "default",
+				},
+				selector: &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "foo"}},
+			},
+			want:    1,
+			wantErr: false,
+		},
+		{
+			name: "namespace scope: get from cache",
+			args: args{
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(scheme.Scheme),
+				informerManager: func(stopCh <-chan struct{}) genericmanager.SingleClusterInformerManager {
+					c := dynamicfake.NewSimpleDynamicClient(scheme.Scheme,
+						&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default", Labels: map[string]string{"bar": "foo"}}})
+					m := genericmanager.NewSingleClusterInformerManager(c, 0, stopCh)
+					m.Lister(corev1.SchemeGroupVersion.WithResource("pods"))
+					m.Start()
+					m.WaitForCacheSync()
+					return m
+				},
+				restMapper: func() meta.RESTMapper {
+					m := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+					m.Add(corev1.SchemeGroupVersion.WithKind("Pod"), meta.RESTScopeNamespace)
+					return m
+				}(),
+				resource: workv1alpha2.ObjectReference{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Namespace:  "default",
+					Name:       "pod",
+				},
+				selector: &metav1.LabelSelector{MatchLabels: map[string]string{"bar": "foo"}},
+			},
+			want:    1,
+			wantErr: false,
+		},
+		{
+			name: "cluster scope: get from client",
+			args: args{
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(scheme.Scheme,
+					&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", Labels: map[string]string{"bar": "bar"}}}),
+				informerManager: func(stopCh <-chan struct{}) genericmanager.SingleClusterInformerManager {
+					return genericmanager.NewSingleClusterInformerManager(dynamicfake.NewSimpleDynamicClient(scheme.Scheme), 0, stopCh)
+				},
+				restMapper: func() meta.RESTMapper {
+					m := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+					m.Add(corev1.SchemeGroupVersion.WithKind("Node"), meta.RESTScopeRoot)
+					return m
+				}(),
+				resource: workv1alpha2.ObjectReference{
+					APIVersion: "v1",
+					Kind:       "Node",
+					Name:       "node",
+				},
+				selector: &metav1.LabelSelector{MatchLabels: map[string]string{"bar": "bar"}},
+			},
+			want:    1,
+			wantErr: false,
+		},
+		{
+			name: "cluster scope: get from cache",
+			args: args{
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(scheme.Scheme),
+				informerManager: func(stopCh <-chan struct{}) genericmanager.SingleClusterInformerManager {
+					c := dynamicfake.NewSimpleDynamicClient(scheme.Scheme,
+						&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", Labels: map[string]string{"bar": "foo"}}})
+					m := genericmanager.NewSingleClusterInformerManager(c, 0, stopCh)
+					m.Lister(corev1.SchemeGroupVersion.WithResource("nodes"))
+					m.Start()
+					m.WaitForCacheSync()
+					return m
+				},
+				restMapper: func() meta.RESTMapper {
+					m := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+					m.Add(corev1.SchemeGroupVersion.WithKind("Node"), meta.RESTScopeRoot)
+					return m
+				}(),
+				resource: workv1alpha2.ObjectReference{
+					APIVersion: "v1",
+					Kind:       "Node",
+					Name:       "node",
+				},
+				selector: &metav1.LabelSelector{MatchLabels: map[string]string{"bar": "foo"}},
+			},
+			want:    1,
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stopCh := make(chan struct{})
+			mgr := tt.args.informerManager(stopCh)
+			selector, _ := metav1.LabelSelectorAsSelector(tt.args.selector)
+			got, err := FetchResourceTemplatesByLabelSelector(tt.args.dynamicClient, mgr, tt.args.restMapper, tt.args.resource, selector)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("FetchResourceTemplate() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if len(got) != tt.want {
+				t.Errorf("FetchResourceTemplate() got = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDeleteWorkByRBNamespaceAndName(t *testing.T) {
 	type args struct {
 		c         client.Client
 		namespace string
 		name      string
+		bindingID string
 	}
 	tests := []struct {
 		name    string
@@ -816,22 +1030,27 @@ func TestDeleteWorkByRBNamespaceAndName(t *testing.T) {
 		{
 			name: "work is not found",
 			args: args{
-				c:         fake.NewClientBuilder().WithScheme(gclient.NewSchema()).Build(),
+				c: fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithIndex(
+					&workv1alpha1.Work{},
+					workv1alpha2.ResourceBindingPermanentIDLabel,
+					IndexerFuncBasedOnLabel(workv1alpha2.ResourceBindingPermanentIDLabel),
+				).Build(),
 				namespace: "default",
 				name:      "foo",
+				bindingID: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 			},
 			want:    nil,
 			wantErr: false,
 		},
 		{
-			name: "delete",
+			name: "delete rb's work",
 			args: args{
 				c: fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(
 					&workv1alpha1.Work{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "w1", Namespace: names.ExecutionSpacePrefix + "cluster",
 							Labels: map[string]string{
-								workv1alpha2.ResourceBindingReferenceKey: names.GenerateBindingReferenceKey("default", "foo"),
+								workv1alpha2.ResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 							},
 							Annotations: map[string]string{
 								workv1alpha2.ResourceBindingNameAnnotationKey:      "foo",
@@ -839,59 +1058,40 @@ func TestDeleteWorkByRBNamespaceAndName(t *testing.T) {
 							},
 						},
 					},
+				).WithIndex(
+					&workv1alpha1.Work{},
+					workv1alpha2.ResourceBindingPermanentIDLabel,
+					IndexerFuncBasedOnLabel(workv1alpha2.ResourceBindingPermanentIDLabel),
 				).Build(),
 				namespace: "default",
 				name:      "foo",
+				bindingID: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 			},
 			want:    []workv1alpha1.Work{},
 			wantErr: false,
 		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := DeleteWorkByRBNamespaceAndName(tt.args.c, tt.args.namespace, tt.args.name); (err != nil) != tt.wantErr {
-				t.Errorf("DeleteWorkByRBNamespaceAndName() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			list := &workv1alpha1.WorkList{}
-			if err := tt.args.c.List(context.TODO(), list); err != nil {
-				t.Error(err)
-				return
-			}
-			if got := list.Items; !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("DeleteWorkByRBNamespaceAndName() got = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDeleteWorkByCRBName(t *testing.T) {
-	type args struct {
-		c    client.Client
-		name string
-	}
-	tests := []struct {
-		name    string
-		args    args
-		want    []workv1alpha1.Work
-		wantErr bool
-	}{
 		{
-			name: "delete",
+			name: "delete crb's work",
 			args: args{
 				c: fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(
 					&workv1alpha1.Work{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "w1", Namespace: names.ExecutionSpacePrefix + "cluster",
 							Labels: map[string]string{
-								workv1alpha2.ClusterResourceBindingReferenceKey: names.GenerateBindingReferenceKey("", "foo"),
+								workv1alpha2.ClusterResourceBindingPermanentIDLabel: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 							},
 							Annotations: map[string]string{
 								workv1alpha2.ClusterResourceBindingAnnotationKey: "foo",
 							},
 						},
 					},
+				).WithIndex(
+					&workv1alpha1.Work{},
+					workv1alpha2.ClusterResourceBindingPermanentIDLabel,
+					IndexerFuncBasedOnLabel(workv1alpha2.ClusterResourceBindingPermanentIDLabel),
 				).Build(),
-				name: "foo",
+				name:      "foo",
+				bindingID: "3617252f-b1bb-43b0-98a1-c7de833c472c",
 			},
 			want:    []workv1alpha1.Work{},
 			wantErr: false,
@@ -899,16 +1099,16 @@ func TestDeleteWorkByCRBName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := DeleteWorkByCRBName(tt.args.c, tt.args.name); (err != nil) != tt.wantErr {
-				t.Errorf("DeleteWorkByRBNamespaceAndName() error = %v, wantErr %v", err, tt.wantErr)
+			if err := DeleteWorks(context.Background(), tt.args.c, tt.args.namespace, tt.args.name, tt.args.bindingID); (err != nil) != tt.wantErr {
+				t.Errorf("DeleteWorks() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			list := &workv1alpha1.WorkList{}
-			if err := tt.args.c.List(context.TODO(), list); err != nil {
+			if err := tt.args.c.List(context.Background(), list); err != nil {
 				t.Error(err)
 				return
 			}
 			if got := list.Items; !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("DeleteWorkByRBNamespaceAndName() got = %v, want %v", got, tt.want)
+				t.Errorf("DeleteWorks() got = %v, want %v", got, tt.want)
 			}
 		})
 	}

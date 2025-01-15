@@ -1,8 +1,23 @@
+/*
+Copyright 2023 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package applicationfailover
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"time"
 
@@ -12,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,15 +35,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
-	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
-	"github.com/karmada-io/karmada/pkg/features"
 	"github.com/karmada-io/karmada/pkg/resourceinterpreter"
 	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
 
-// CRBApplicationFailoverControllerName is the controller name that will be used when reporting events.
+// CRBApplicationFailoverControllerName is the controller name that will be used when reporting events and metrics.
 const CRBApplicationFailoverControllerName = "cluster-resource-binding-application-failover-controller"
 
 // CRBApplicationFailoverController is to sync ClusterResourceBinding's application failover behavior.
@@ -55,7 +67,7 @@ func (c *CRBApplicationFailoverController) Reconcile(ctx context.Context, req co
 			c.workloadUnhealthyMap.delete(req.NamespacedName)
 			return controllerruntime.Result{}, nil
 		}
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	if !c.clusterResourceBindingFilter(binding) {
@@ -63,12 +75,12 @@ func (c *CRBApplicationFailoverController) Reconcile(ctx context.Context, req co
 		return controllerruntime.Result{}, nil
 	}
 
-	retryDuration, err := c.syncBinding(binding)
+	retryDuration, err := c.syncBinding(ctx, binding)
 	if err != nil {
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 	if retryDuration > 0 {
-		klog.V(4).Infof("Retry to check health status of the workload after %v minutes.", retryDuration.Minutes())
+		klog.V(4).Infof("Retry to check health status of the workload after %v seconds.", retryDuration.Seconds())
 		return controllerruntime.Result{RequeueAfter: retryDuration}, nil
 	}
 	return controllerruntime.Result{}, nil
@@ -106,7 +118,7 @@ func (c *CRBApplicationFailoverController) detectFailure(clusters []string, tole
 	return duration, needEvictClusters
 }
 
-func (c *CRBApplicationFailoverController) syncBinding(binding *workv1alpha2.ClusterResourceBinding) (time.Duration, error) {
+func (c *CRBApplicationFailoverController) syncBinding(ctx context.Context, binding *workv1alpha2.ClusterResourceBinding) (time.Duration, error) {
 	key := types.NamespacedName{Name: binding.Name, Namespace: binding.Namespace}
 	tolerationSeconds := binding.Spec.Failover.Application.DecisionConditions.TolerationSeconds
 
@@ -125,7 +137,7 @@ func (c *CRBApplicationFailoverController) syncBinding(binding *workv1alpha2.Clu
 	}
 
 	if len(needEvictClusters) != 0 {
-		if err = c.updateBinding(binding, allClusters, needEvictClusters); err != nil {
+		if err = c.updateBinding(ctx, binding, allClusters, needEvictClusters); err != nil {
 			return 0, err
 		}
 	}
@@ -137,34 +149,20 @@ func (c *CRBApplicationFailoverController) syncBinding(binding *workv1alpha2.Clu
 }
 
 func (c *CRBApplicationFailoverController) evictBinding(binding *workv1alpha2.ClusterResourceBinding, clusters []string) error {
+	clustersBeforeFailover := getClusterNamesFromTargetClusters(binding.Spec.Clusters)
 	for _, cluster := range clusters {
-		switch binding.Spec.Failover.Application.PurgeMode {
-		case policyv1alpha1.Graciously:
-			if features.FeatureGate.Enabled(features.GracefulEviction) {
-				binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(workv1alpha2.WithProducer(CRBApplicationFailoverControllerName), workv1alpha2.WithReason(workv1alpha2.EvictionReasonApplicationFailure), workv1alpha2.WithGracePeriodSeconds(binding.Spec.Failover.Application.GracePeriodSeconds)))
-			} else {
-				err := fmt.Errorf("GracefulEviction featureGate must be enabled when purgeMode is %s", policyv1alpha1.Graciously)
-				klog.Error(err)
-				return err
-			}
-		case policyv1alpha1.Never:
-			if features.FeatureGate.Enabled(features.GracefulEviction) {
-				binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(workv1alpha2.WithProducer(CRBApplicationFailoverControllerName), workv1alpha2.WithReason(workv1alpha2.EvictionReasonApplicationFailure), workv1alpha2.WithSuppressDeletion(pointer.Bool(true))))
-			} else {
-				err := fmt.Errorf("GracefulEviction featureGate must be enabled when purgeMode is %s", policyv1alpha1.Never)
-				klog.Error(err)
-				return err
-			}
-		case policyv1alpha1.Immediately:
-			binding.Spec.RemoveCluster(cluster)
+		taskOpts, err := buildTaskOptions(binding.Spec.Failover.Application, binding.Status.AggregatedStatus, cluster, CRBApplicationFailoverControllerName, clustersBeforeFailover)
+		if err != nil {
+			klog.Errorf("failed to build TaskOptions for ClusterResourceBinding(%s) under Cluster(%s): %v", binding.Name, cluster, err)
+			return err
 		}
+		binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(taskOpts...))
 	}
-
 	return nil
 }
 
-func (c *CRBApplicationFailoverController) updateBinding(binding *workv1alpha2.ClusterResourceBinding, allClusters sets.Set[string], needEvictClusters []string) error {
-	if err := c.Update(context.TODO(), binding); err != nil {
+func (c *CRBApplicationFailoverController) updateBinding(ctx context.Context, binding *workv1alpha2.ClusterResourceBinding, allClusters sets.Set[string], needEvictClusters []string) error {
+	if err := c.Update(ctx, binding); err != nil {
 		for _, cluster := range needEvictClusters {
 			helper.EmitClusterEvictionEventForClusterResourceBinding(binding, cluster, c.EventRecorder, err)
 		}
@@ -173,11 +171,6 @@ func (c *CRBApplicationFailoverController) updateBinding(binding *workv1alpha2.C
 	}
 	for _, cluster := range needEvictClusters {
 		allClusters.Delete(cluster)
-	}
-	if !features.FeatureGate.Enabled(features.GracefulEviction) {
-		for _, cluster := range needEvictClusters {
-			helper.EmitClusterEvictionEventForClusterResourceBinding(binding, cluster, c.EventRecorder, nil)
-		}
 	}
 
 	return nil
@@ -210,12 +203,13 @@ func (c *CRBApplicationFailoverController) SetupWithManager(mgr controllerruntim
 			}
 			return true
 		},
-		GenericFunc: func(genericEvent event.GenericEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
 
 	return controllerruntime.NewControllerManagedBy(mgr).
+		Named(CRBApplicationFailoverControllerName).
 		For(&workv1alpha2.ClusterResourceBinding{}, builder.WithPredicates(clusterResourceBindingPredicateFn)).
-		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter(c.RateLimiterOptions)}).
+		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](c.RateLimiterOptions)}).
 		Complete(c)
 }
 

@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package scheduler
 
 import (
@@ -6,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -37,7 +54,9 @@ import (
 	frameworkplugins "github.com/karmada-io/karmada/pkg/scheduler/framework/plugins"
 	"github.com/karmada-io/karmada/pkg/scheduler/framework/runtime"
 	"github.com/karmada-io/karmada/pkg/scheduler/metrics"
+	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
 	"github.com/karmada-io/karmada/pkg/util"
+	"github.com/karmada-io/karmada/pkg/util/grpcconnection"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 	utilmetrics "github.com/karmada-io/karmada/pkg/util/metrics"
 )
@@ -54,14 +73,13 @@ const (
 )
 
 const (
-	scheduleSuccessReason  = "BindingScheduled"
-	scheduleFailedReason   = "BindingFailedScheduling"
-	scheduleSuccessMessage = "Binding has been scheduled"
+	// DefaultScheduler defines the name of default scheduler.
+	DefaultScheduler = "default-scheduler"
 )
 
 const (
-	// DefaultScheduler defines the name of default scheduler.
-	DefaultScheduler = "default-scheduler"
+	// successfulSchedulingMessage defines the successful binding event message.
+	successfulSchedulingMessage = "Binding has been scheduled successfully."
 )
 
 // Scheduler is the scheduler schema, which is used to schedule a specific resource to specific clusters
@@ -78,7 +96,7 @@ type Scheduler struct {
 	// ResourceBinding/ClusterResourceBinding rescheduling.
 	clusterReconcileWorker util.AsyncWorker
 	// TODO: implement a priority scheduling queue
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[any]
 
 	Algorithm      core.ScheduleAlgorithm
 	schedulerCache schedulercache.Cache
@@ -88,9 +106,10 @@ type Scheduler struct {
 	enableSchedulerEstimator            bool
 	disableSchedulerEstimatorInPullMode bool
 	schedulerEstimatorCache             *estimatorclient.SchedulerEstimatorCache
+	schedulerEstimatorServiceNamespace  string
 	schedulerEstimatorServicePrefix     string
-	schedulerEstimatorPort              int
 	schedulerEstimatorWorker            util.AsyncWorker
+	schedulerEstimatorClientConfig      *grpcconnection.ClientConfig
 	schedulerName                       string
 
 	enableEmptyWorkloadPropagation bool
@@ -103,10 +122,10 @@ type schedulerOptions struct {
 	disableSchedulerEstimatorInPullMode bool
 	// schedulerEstimatorTimeout specifies the timeout period of calling the accurate scheduler estimator service.
 	schedulerEstimatorTimeout metav1.Duration
+	// schedulerEstimatorServiceNamespace specifies the namespace to be used for discovering scheduler estimator services.
+	schedulerEstimatorServiceNamespace string
 	// SchedulerEstimatorServicePrefix presents the prefix of the accurate scheduler estimator service name.
 	schedulerEstimatorServicePrefix string
-	// schedulerEstimatorPort is the port that the accurate scheduler estimator server serves at.
-	schedulerEstimatorPort int
 	// schedulerName is the name of the scheduler. Default is "default-scheduler".
 	schedulerName string
 	//enableEmptyWorkloadPropagation represents whether allow workload with replicas 0 propagated to member clusters should be enabled
@@ -115,6 +134,10 @@ type schedulerOptions struct {
 	outOfTreeRegistry runtime.Registry
 	// plugins is the list of plugins to enable or disable
 	plugins []string
+	// contains the options for rate limiter.
+	RateLimiterOptions ratelimiterflag.Options
+	// schedulerEstimatorClientConfig contains the configuration of GRPC.
+	schedulerEstimatorClientConfig *grpcconnection.ClientConfig
 }
 
 // Option configures a Scheduler
@@ -124,6 +147,19 @@ type Option func(*schedulerOptions)
 func WithEnableSchedulerEstimator(enableSchedulerEstimator bool) Option {
 	return func(o *schedulerOptions) {
 		o.enableSchedulerEstimator = enableSchedulerEstimator
+	}
+}
+
+// WithSchedulerEstimatorConnection sets the grpc config for scheduler
+func WithSchedulerEstimatorConnection(port int, certFile, keyFile, trustedCAFile string, insecureSkipVerify bool) Option {
+	return func(o *schedulerOptions) {
+		o.schedulerEstimatorClientConfig = &grpcconnection.ClientConfig{
+			CertFile:                 certFile,
+			KeyFile:                  keyFile,
+			ServerAuthCAFile:         trustedCAFile,
+			InsecureSkipServerVerify: insecureSkipVerify,
+			TargetPort:               port,
+		}
 	}
 }
 
@@ -141,17 +177,17 @@ func WithSchedulerEstimatorTimeout(schedulerEstimatorTimeout metav1.Duration) Op
 	}
 }
 
+// WithSchedulerEstimatorServiceNamespace sets the schedulerEstimatorServiceNamespace for the scheduler
+func WithSchedulerEstimatorServiceNamespace(schedulerEstimatorServiceNamespace string) Option {
+	return func(o *schedulerOptions) {
+		o.schedulerEstimatorServiceNamespace = schedulerEstimatorServiceNamespace
+	}
+}
+
 // WithSchedulerEstimatorServicePrefix sets the schedulerEstimatorServicePrefix for scheduler
 func WithSchedulerEstimatorServicePrefix(schedulerEstimatorServicePrefix string) Option {
 	return func(o *schedulerOptions) {
 		o.schedulerEstimatorServicePrefix = schedulerEstimatorServicePrefix
-	}
-}
-
-// WithSchedulerEstimatorPort sets the schedulerEstimatorPort for scheduler
-func WithSchedulerEstimatorPort(schedulerEstimatorPort int) Option {
-	return func(o *schedulerOptions) {
-		o.schedulerEstimatorPort = schedulerEstimatorPort
 	}
 }
 
@@ -184,20 +220,26 @@ func WithOutOfTreeRegistry(registry runtime.Registry) Option {
 	}
 }
 
+// WithRateLimiterOptions sets the rateLimiterOptions for scheduler
+func WithRateLimiterOptions(rateLimiterOptions ratelimiterflag.Options) Option {
+	return func(o *schedulerOptions) {
+		o.RateLimiterOptions = rateLimiterOptions
+	}
+}
+
 // NewScheduler instantiates a scheduler
 func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientset.Interface, kubeClient kubernetes.Interface, opts ...Option) (*Scheduler, error) {
 	factory := informerfactory.NewSharedInformerFactory(karmadaClient, 0)
 	bindingLister := factory.Work().V1alpha2().ResourceBindings().Lister()
 	clusterBindingLister := factory.Work().V1alpha2().ClusterResourceBindings().Lister()
 	clusterLister := factory.Cluster().V1alpha1().Clusters().Lister()
-	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "scheduler-queue")
 	schedulerCache := schedulercache.NewCache(clusterLister)
 
 	options := schedulerOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-
+	queue := workqueue.NewTypedRateLimitingQueueWithConfig(ratelimiterflag.DefaultControllerRateLimiter[any](options.RateLimiterOptions), workqueue.TypedRateLimitingQueueConfig[any]{Name: "scheduler-queue"})
 	registry := frameworkplugins.NewInTreeRegistry()
 	if err := registry.Merge(options.outOfTreeRegistry); err != nil {
 		return nil, err
@@ -230,7 +272,8 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 		sched.enableSchedulerEstimator = options.enableSchedulerEstimator
 		sched.disableSchedulerEstimatorInPullMode = options.disableSchedulerEstimatorInPullMode
 		sched.schedulerEstimatorServicePrefix = options.schedulerEstimatorServicePrefix
-		sched.schedulerEstimatorPort = options.schedulerEstimatorPort
+		sched.schedulerEstimatorServiceNamespace = options.schedulerEstimatorServiceNamespace
+		sched.schedulerEstimatorClientConfig = options.schedulerEstimatorClientConfig
 		sched.schedulerEstimatorCache = estimatorclient.NewSchedulerEstimatorCache()
 		schedulerEstimatorWorkerOptions := util.Options{
 			Name:          "scheduler-estimator",
@@ -268,6 +311,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	go wait.Until(s.worker, time.Second, stopCh)
 
 	<-stopCh
+	s.queue.ShutDown()
 }
 
 func (s *Scheduler) worker() {
@@ -308,6 +352,12 @@ func (s *Scheduler) doScheduleBinding(namespace, name string) (err error) {
 		}
 		return err
 	}
+	if !rb.DeletionTimestamp.IsZero() {
+		s.recordScheduleResultEventForResourceBinding(rb, nil, fmt.Errorf("skip schedule deleting resourceBinding: %s/%s", rb.Namespace, rb.Name))
+		klog.V(4).InfoS("Skip schedule deleting ResourceBinding", "ResourceBinding", klog.KObj(rb))
+		return nil
+	}
+
 	rb = rb.DeepCopy()
 
 	if rb.Spec.Placement == nil {
@@ -331,6 +381,13 @@ func (s *Scheduler) doScheduleBinding(namespace, name string) (err error) {
 		klog.Infof("Reschedule ResourceBinding(%s/%s) as replicas scaled down or scaled up", namespace, name)
 		err = s.scheduleResourceBinding(rb)
 		metrics.BindingSchedule(string(ScaleSchedule), utilmetrics.DurationInSeconds(start), err)
+		return err
+	}
+	if util.RescheduleRequired(rb.Spec.RescheduleTriggeredAt, rb.Status.LastScheduledTime) {
+		// explicitly triggered reschedule
+		klog.Infof("Reschedule ResourceBinding(%s/%s) as explicitly triggered reschedule", namespace, name)
+		err = s.scheduleResourceBinding(rb)
+		metrics.BindingSchedule(string(ReconcileSchedule), utilmetrics.DurationInSeconds(start), err)
 		return err
 	}
 	if rb.Spec.Replicas == 0 ||
@@ -365,6 +422,12 @@ func (s *Scheduler) doScheduleClusterBinding(name string) (err error) {
 		}
 		return err
 	}
+	if !crb.DeletionTimestamp.IsZero() {
+		s.recordScheduleResultEventForClusterResourceBinding(crb, nil, fmt.Errorf("skip schedule deleting clusterResourceBinding: %s", crb.Name))
+		klog.V(4).InfoS("Skip schedule deleting ClusterResourceBinding", "ClusterResourceBinding", klog.KObj(crb))
+		return nil
+	}
+
 	crb = crb.DeepCopy()
 
 	if crb.Spec.Placement == nil {
@@ -388,6 +451,13 @@ func (s *Scheduler) doScheduleClusterBinding(name string) (err error) {
 		klog.Infof("Reschedule ClusterResourceBinding(%s) as replicas scaled down or scaled up", name)
 		err = s.scheduleClusterResourceBinding(crb)
 		metrics.BindingSchedule(string(ScaleSchedule), utilmetrics.DurationInSeconds(start), err)
+		return err
+	}
+	if util.RescheduleRequired(crb.Spec.RescheduleTriggeredAt, crb.Status.LastScheduledTime) {
+		// explicitly triggered reschedule
+		klog.Infof("Start to schedule ClusterResourceBinding(%s) as explicitly triggered reschedule", name)
+		err = s.scheduleClusterResourceBinding(crb)
+		metrics.BindingSchedule(string(ReconcileSchedule), utilmetrics.DurationInSeconds(start), err)
 		return err
 	}
 	if crb.Spec.Replicas == 0 ||
@@ -415,18 +485,14 @@ func (s *Scheduler) doScheduleClusterBinding(name string) (err error) {
 
 func (s *Scheduler) scheduleResourceBinding(rb *workv1alpha2.ResourceBinding) (err error) {
 	defer func() {
-		var condition metav1.Condition
-		if err == nil {
-			condition = util.NewCondition(workv1alpha2.Scheduled, scheduleSuccessReason, scheduleSuccessMessage, metav1.ConditionTrue)
-		} else {
-			condition = util.NewCondition(workv1alpha2.Scheduled, scheduleFailedReason, err.Error(), metav1.ConditionFalse)
-		}
+		condition, ignoreErr := getConditionByError(err)
 		if updateErr := patchBindingStatusCondition(s.KarmadaClient, rb, condition); updateErr != nil {
+			// if patch error occurs, just return patch error to reconcile again.
+			err = updateErr
 			klog.Errorf("Failed to patch schedule status to ResourceBinding(%s/%s): %v", rb.Namespace, rb.Name, err)
-			if err == nil {
-				// schedule succeed but update status failed, return err in order to retry in next loop.
-				err = updateErr
-			}
+		} else if ignoreErr && err != nil {
+			// for finished schedule, we won't retry.
+			err = nil
 		}
 	}()
 
@@ -447,21 +513,21 @@ func (s *Scheduler) scheduleResourceBindingWithClusterAffinity(rb *workv1alpha2.
 	}
 
 	scheduleResult, err := s.Algorithm.Schedule(context.TODO(), &rb.Spec, &rb.Status, &core.ScheduleAlgorithmOption{EnableEmptyWorkloadPropagation: s.enableEmptyWorkloadPropagation})
-	var noClusterFit *framework.FitError
-	// in case of no cluster fit, can not return but continue to patch(cleanup) the result.
-	if err != nil && !errors.As(err, &noClusterFit) {
-		s.recordScheduleResultEventForResourceBinding(rb, err)
+	var fitErr *framework.FitError
+	// in case of no cluster error, can not return but continue to patch(cleanup) the result.
+	if err != nil && !errors.As(err, &fitErr) {
+		s.recordScheduleResultEventForResourceBinding(rb, nil, err)
 		klog.Errorf("Failed scheduling ResourceBinding(%s/%s): %v", rb.Namespace, rb.Name, err)
 		return err
 	}
 
 	klog.V(4).Infof("ResourceBinding(%s/%s) scheduled to clusters %v", rb.Namespace, rb.Name, scheduleResult.SuggestedClusters)
 	patchErr := s.patchScheduleResultForResourceBinding(rb, string(placementBytes), scheduleResult.SuggestedClusters)
-	s.recordScheduleResultEventForResourceBinding(rb, utilerrors.NewAggregate([]error{err, patchErr}))
-
-	// only care about the patch result,
-	// for FitError already recorded by event
-	return patchErr
+	if patchErr != nil {
+		err = utilerrors.NewAggregate([]error{err, patchErr})
+	}
+	s.recordScheduleResultEventForResourceBinding(rb, scheduleResult.SuggestedClusters, err)
+	return err
 }
 
 func (s *Scheduler) scheduleResourceBindingWithClusterAffinities(rb *workv1alpha2.ResourceBinding) error {
@@ -496,7 +562,7 @@ func (s *Scheduler) scheduleResourceBindingWithClusterAffinities(rb *workv1alpha
 
 		err = fmt.Errorf("failed to schedule ResourceBinding(%s/%s) with clusterAffiliates index(%d): %v", rb.Namespace, rb.Name, affinityIndex, err)
 		klog.Error(err)
-		s.recordScheduleResultEventForResourceBinding(rb, err)
+		s.recordScheduleResultEventForResourceBinding(rb, nil, err)
 		affinityIndex++
 	}
 
@@ -505,22 +571,27 @@ func (s *Scheduler) scheduleResourceBindingWithClusterAffinities(rb *workv1alpha
 
 		updatedStatus.SchedulerObservedAffinityName = rb.Status.SchedulerObservedAffinityName
 
-		var noClusterFit *framework.FitError
-		if !errors.As(firstErr, &noClusterFit) {
+		var fitErr *framework.FitError
+		if !errors.As(firstErr, &fitErr) {
 			return firstErr
 		}
 
 		klog.V(4).Infof("ResourceBinding(%s/%s) scheduled to clusters %v", rb.Namespace, rb.Name, nil)
 		patchErr := s.patchScheduleResultForResourceBinding(rb, string(placementBytes), nil)
-		s.recordScheduleResultEventForResourceBinding(rb, patchErr)
-		return patchErr
+		if patchErr != nil {
+			err = utilerrors.NewAggregate([]error{firstErr, patchErr})
+		} else {
+			err = firstErr
+		}
+		s.recordScheduleResultEventForResourceBinding(rb, nil, err)
+		return err
 	}
 
 	klog.V(4).Infof("ResourceBinding(%s/%s) scheduled to clusters %v", rb.Namespace, rb.Name, scheduleResult.SuggestedClusters)
 	patchErr := s.patchScheduleResultForResourceBinding(rb, string(placementBytes), scheduleResult.SuggestedClusters)
 	patchStatusErr := patchBindingStatusWithAffinityName(s.KarmadaClient, rb, updatedStatus.SchedulerObservedAffinityName)
 	scheduleErr := utilerrors.NewAggregate([]error{patchErr, patchStatusErr})
-	s.recordScheduleResultEventForResourceBinding(rb, scheduleErr)
+	s.recordScheduleResultEventForResourceBinding(rb, nil, scheduleErr)
 	return scheduleErr
 }
 
@@ -552,18 +623,14 @@ func (s *Scheduler) patchScheduleResultForResourceBinding(oldBinding *workv1alph
 
 func (s *Scheduler) scheduleClusterResourceBinding(crb *workv1alpha2.ClusterResourceBinding) (err error) {
 	defer func() {
-		var condition metav1.Condition
-		if err == nil {
-			condition = util.NewCondition(workv1alpha2.Scheduled, scheduleSuccessReason, scheduleSuccessMessage, metav1.ConditionTrue)
-		} else {
-			condition = util.NewCondition(workv1alpha2.Scheduled, scheduleFailedReason, err.Error(), metav1.ConditionFalse)
-		}
+		condition, ignoreErr := getConditionByError(err)
 		if updateErr := patchClusterBindingStatusCondition(s.KarmadaClient, crb, condition); updateErr != nil {
+			// if patch error occurs, just return patch error to reconcile again.
+			err = updateErr
 			klog.Errorf("Failed to patch schedule status to ClusterResourceBinding(%s): %v", crb.Name, err)
-			if err == nil {
-				// schedule succeed but update status failed, return err in order to retry in next loop.
-				err = updateErr
-			}
+		} else if ignoreErr && err != nil {
+			// for finished schedule, we won't retry.
+			err = nil
 		}
 	}()
 
@@ -584,21 +651,21 @@ func (s *Scheduler) scheduleClusterResourceBindingWithClusterAffinity(crb *workv
 	}
 
 	scheduleResult, err := s.Algorithm.Schedule(context.TODO(), &crb.Spec, &crb.Status, &core.ScheduleAlgorithmOption{EnableEmptyWorkloadPropagation: s.enableEmptyWorkloadPropagation})
-	var noClusterFit *framework.FitError
-	// in case of no cluster fit, can not return but continue to patch(cleanup) the result.
-	if err != nil && !errors.As(err, &noClusterFit) {
-		s.recordScheduleResultEventForClusterResourceBinding(crb, err)
+	var fitErr *framework.FitError
+	// in case of no cluster error, can not return but continue to patch(cleanup) the result.
+	if err != nil && !errors.As(err, &fitErr) {
+		s.recordScheduleResultEventForClusterResourceBinding(crb, nil, err)
 		klog.Errorf("Failed scheduling clusterResourceBinding(%s): %v", crb.Name, err)
 		return err
 	}
 
 	klog.V(4).Infof("clusterResourceBinding(%s) scheduled to clusters %v", crb.Name, scheduleResult.SuggestedClusters)
 	patchErr := s.patchScheduleResultForClusterResourceBinding(crb, string(placementBytes), scheduleResult.SuggestedClusters)
-	s.recordScheduleResultEventForClusterResourceBinding(crb, utilerrors.NewAggregate([]error{err, patchErr}))
-
-	// only care about the patch result,
-	// for FitError already recorded by event
-	return patchErr
+	if patchErr != nil {
+		err = utilerrors.NewAggregate([]error{err, patchErr})
+	}
+	s.recordScheduleResultEventForClusterResourceBinding(crb, scheduleResult.SuggestedClusters, err)
+	return err
 }
 
 func (s *Scheduler) scheduleClusterResourceBindingWithClusterAffinities(crb *workv1alpha2.ClusterResourceBinding) error {
@@ -633,7 +700,7 @@ func (s *Scheduler) scheduleClusterResourceBindingWithClusterAffinities(crb *wor
 
 		err = fmt.Errorf("failed to schedule ClusterResourceBinding(%s) with clusterAffiliates index(%d): %v", crb.Name, affinityIndex, err)
 		klog.Error(err)
-		s.recordScheduleResultEventForClusterResourceBinding(crb, err)
+		s.recordScheduleResultEventForClusterResourceBinding(crb, nil, err)
 		affinityIndex++
 	}
 
@@ -642,22 +709,27 @@ func (s *Scheduler) scheduleClusterResourceBindingWithClusterAffinities(crb *wor
 
 		updatedStatus.SchedulerObservedAffinityName = crb.Status.SchedulerObservedAffinityName
 
-		var noClusterFit *framework.FitError
-		if !errors.As(firstErr, &noClusterFit) {
+		var fitErr *framework.FitError
+		if !errors.As(firstErr, &fitErr) {
 			return firstErr
 		}
 
 		klog.V(4).Infof("ClusterResourceBinding(%s) scheduled to clusters %v", crb.Name, nil)
 		patchErr := s.patchScheduleResultForClusterResourceBinding(crb, string(placementBytes), nil)
-		s.recordScheduleResultEventForClusterResourceBinding(crb, patchErr)
-		return patchErr
+		if patchErr != nil {
+			err = utilerrors.NewAggregate([]error{firstErr, patchErr})
+		} else {
+			err = firstErr
+		}
+		s.recordScheduleResultEventForClusterResourceBinding(crb, nil, err)
+		return err
 	}
 
 	klog.V(4).Infof("ClusterResourceBinding(%s) scheduled to clusters %v", crb.Name, scheduleResult.SuggestedClusters)
 	patchErr := s.patchScheduleResultForClusterResourceBinding(crb, string(placementBytes), scheduleResult.SuggestedClusters)
 	patchStatusErr := patchClusterBindingStatusWithAffinityName(s.KarmadaClient, crb, updatedStatus.SchedulerObservedAffinityName)
 	scheduleErr := utilerrors.NewAggregate([]error{patchErr, patchStatusErr})
-	s.recordScheduleResultEventForClusterResourceBinding(crb, scheduleErr)
+	s.recordScheduleResultEventForClusterResourceBinding(crb, nil, scheduleErr)
 	return scheduleErr
 }
 
@@ -715,7 +787,12 @@ func (s *Scheduler) reconcileEstimatorConnection(key util.QueueKey) error {
 		return nil
 	}
 
-	return estimatorclient.EstablishConnection(s.KubeClient, name, s.schedulerEstimatorCache, s.schedulerEstimatorServicePrefix, s.schedulerEstimatorPort)
+	serviceInfo := estimatorclient.SchedulerEstimatorServiceInfo{
+		Name:       name,
+		Namespace:  s.schedulerEstimatorServiceNamespace,
+		NamePrefix: s.schedulerEstimatorServicePrefix,
+	}
+	return estimatorclient.EstablishConnection(s.KubeClient, serviceInfo, s.schedulerEstimatorCache, s.schedulerEstimatorClientConfig)
 }
 
 func (s *Scheduler) establishEstimatorConnections() {
@@ -728,7 +805,12 @@ func (s *Scheduler) establishEstimatorConnections() {
 		if clusterList.Items[i].Spec.SyncMode == clusterv1alpha1.Pull && s.disableSchedulerEstimatorInPullMode {
 			continue
 		}
-		if err = estimatorclient.EstablishConnection(s.KubeClient, clusterList.Items[i].Name, s.schedulerEstimatorCache, s.schedulerEstimatorServicePrefix, s.schedulerEstimatorPort); err != nil {
+		serviceInfo := estimatorclient.SchedulerEstimatorServiceInfo{
+			Name:       clusterList.Items[i].Name,
+			Namespace:  s.schedulerEstimatorServiceNamespace,
+			NamePrefix: s.schedulerEstimatorServicePrefix,
+		}
+		if err = estimatorclient.EstablishConnection(s.KubeClient, serviceInfo, s.schedulerEstimatorCache, s.schedulerEstimatorClientConfig); err != nil {
 			klog.Error(err)
 		}
 	}
@@ -744,6 +826,8 @@ func patchBindingStatusCondition(karmadaClient karmadaclientset.Interface, rb *w
 	// will succeed eventually.
 	if newScheduledCondition.Status == metav1.ConditionTrue {
 		updateRB.Status.SchedulerObservedGeneration = rb.Generation
+		currentTime := metav1.Now()
+		updateRB.Status.LastScheduledTime = &currentTime
 	}
 
 	if reflect.DeepEqual(rb.Status, updateRB.Status) {
@@ -765,7 +849,7 @@ func patchBindingStatusWithAffinityName(karmadaClient karmadaclientset.Interface
 }
 
 func patchBindingStatus(karmadaClient karmadaclientset.Interface, rb, updateRB *workv1alpha2.ResourceBinding) error {
-	patchBytes, err := helper.GenMergePatch(rb, updateRB)
+	patchBytes, err := helper.GenFieldMergePatch("status", rb.Status, updateRB.Status)
 	if err != nil {
 		return err
 	}
@@ -793,6 +877,8 @@ func patchClusterBindingStatusCondition(karmadaClient karmadaclientset.Interface
 	// will succeed eventually.
 	if newScheduledCondition.Status == metav1.ConditionTrue {
 		updateCRB.Status.SchedulerObservedGeneration = crb.Generation
+		currentTime := metav1.Now()
+		updateCRB.Status.LastScheduledTime = &currentTime
 	}
 
 	if reflect.DeepEqual(crb.Status, updateCRB.Status) {
@@ -814,7 +900,7 @@ func patchClusterBindingStatusWithAffinityName(karmadaClient karmadaclientset.In
 }
 
 func patchClusterResourceBindingStatus(karmadaClient karmadaclientset.Interface, crb, updateCRB *workv1alpha2.ClusterResourceBinding) error {
-	patchBytes, err := helper.GenMergePatch(crb, updateCRB)
+	patchBytes, err := helper.GenFieldMergePatch("status", crb.Status, updateCRB.Status)
 	if err != nil {
 		return err
 	}
@@ -832,7 +918,8 @@ func patchClusterResourceBindingStatus(karmadaClient karmadaclientset.Interface,
 	return nil
 }
 
-func (s *Scheduler) recordScheduleResultEventForResourceBinding(rb *workv1alpha2.ResourceBinding, schedulerErr error) {
+func (s *Scheduler) recordScheduleResultEventForResourceBinding(rb *workv1alpha2.ResourceBinding,
+	scheduleResult []workv1alpha2.TargetCluster, schedulerErr error) {
 	if rb == nil {
 		return
 	}
@@ -846,15 +933,17 @@ func (s *Scheduler) recordScheduleResultEventForResourceBinding(rb *workv1alpha2
 	}
 
 	if schedulerErr == nil {
-		s.eventRecorder.Event(rb, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, scheduleSuccessMessage)
-		s.eventRecorder.Event(ref, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, scheduleSuccessMessage)
+		successMsg := fmt.Sprintf("%s Result: {%s}", successfulSchedulingMessage, targetClustersToString(scheduleResult))
+		s.eventRecorder.Event(rb, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, successMsg)
+		s.eventRecorder.Event(ref, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, successMsg)
 	} else {
 		s.eventRecorder.Event(rb, corev1.EventTypeWarning, events.EventReasonScheduleBindingFailed, schedulerErr.Error())
 		s.eventRecorder.Event(ref, corev1.EventTypeWarning, events.EventReasonScheduleBindingFailed, schedulerErr.Error())
 	}
 }
 
-func (s *Scheduler) recordScheduleResultEventForClusterResourceBinding(crb *workv1alpha2.ClusterResourceBinding, schedulerErr error) {
+func (s *Scheduler) recordScheduleResultEventForClusterResourceBinding(crb *workv1alpha2.ClusterResourceBinding,
+	scheduleResult []workv1alpha2.TargetCluster, schedulerErr error) {
 	if crb == nil {
 		return
 	}
@@ -868,10 +957,20 @@ func (s *Scheduler) recordScheduleResultEventForClusterResourceBinding(crb *work
 	}
 
 	if schedulerErr == nil {
-		s.eventRecorder.Event(crb, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, scheduleSuccessMessage)
-		s.eventRecorder.Event(ref, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, scheduleSuccessMessage)
+		successMsg := fmt.Sprintf("%s Result {%s}", successfulSchedulingMessage, targetClustersToString(scheduleResult))
+		s.eventRecorder.Event(crb, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, successMsg)
+		s.eventRecorder.Event(ref, corev1.EventTypeNormal, events.EventReasonScheduleBindingSucceed, successMsg)
 	} else {
 		s.eventRecorder.Event(crb, corev1.EventTypeWarning, events.EventReasonScheduleBindingFailed, schedulerErr.Error())
 		s.eventRecorder.Event(ref, corev1.EventTypeWarning, events.EventReasonScheduleBindingFailed, schedulerErr.Error())
 	}
+}
+
+// targetClustersToString convert []workv1alpha2.TargetCluster to string in format like "member:1, member2:2".
+func targetClustersToString(tcs []workv1alpha2.TargetCluster) string {
+	tcsStrs := make([]string, 0, len(tcs))
+	for _, cluster := range tcs {
+		tcsStrs = append(tcsStrs, fmt.Sprintf("%s:%d", cluster.Name, cluster.Replicas))
+	}
+	return strings.Join(tcsStrs, ", ")
 }

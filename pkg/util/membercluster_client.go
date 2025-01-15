@@ -1,3 +1,19 @@
+/*
+Copyright 2020 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package util
 
 import (
@@ -65,7 +81,11 @@ func NewClusterScaleClientSet(clusterName string, client client.Client) (*Cluste
 	if clusterConfig != nil {
 		hpaClient := kubeclientset.NewForConfigOrDie(clusterConfig)
 		scaleKindResolver := scale.NewDiscoveryScaleKindResolver(hpaClient.Discovery())
-		mapper, err := apiutil.NewDiscoveryRESTMapper(clusterConfig)
+		httpClient, err := rest.HTTPClientFor(clusterConfig)
+		if err != nil {
+			return nil, err
+		}
+		mapper, err := apiutil.NewDynamicRESTMapper(clusterConfig, httpClient)
 		if err != nil {
 			return nil, err
 		}
@@ -201,6 +221,10 @@ func BuildClusterConfig(clusterName string,
 			return nil, err
 		}
 		clusterConfig.Proxy = http.ProxyURL(proxy)
+
+		if len(cluster.Spec.ProxyHeader) != 0 {
+			clusterConfig.Wrap(NewProxyHeaderRoundTripperWrapperConstructor(clusterConfig.WrapTransport, cluster.Spec.ProxyHeader))
+		}
 	}
 
 	return clusterConfig, nil

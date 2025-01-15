@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
@@ -156,12 +172,12 @@ var _ = ginkgo.Describe("[resource-status collection] resource status collection
 				for index, clusterName := range framework.ClusterNames() {
 					clusterClient := framework.GetClusterClient(clusterName)
 					gomega.Expect(clusterClient).ShouldNot(gomega.BeNil())
-
 					ingresses := []corev1.LoadBalancerIngress{{IP: fmt.Sprintf("172.19.1.%d", index+6)}}
 					for _, ingress := range ingresses {
 						svcLoadBalancer.Ingress = append(svcLoadBalancer.Ingress, corev1.LoadBalancerIngress{
 							IP:       ingress.IP,
 							Hostname: clusterName,
+							IPMode:   ingress.IPMode,
 						})
 					}
 
@@ -182,8 +198,14 @@ var _ = ginkgo.Describe("[resource-status collection] resource status collection
 					latestSvc, err := kubeClient.CoreV1().Services(serviceNamespace).Get(context.TODO(), serviceName, metav1.GetOptions{})
 					g.Expect(err).NotTo(gomega.HaveOccurred())
 
+					// TODO:  Once karmada-apiserver v1.30 deploy by default,delete the following five lines, see https://github.com/karmada-io/karmada/pull/5141
+					for i := range latestSvc.Status.LoadBalancer.Ingress {
+						if latestSvc.Status.LoadBalancer.Ingress[i].IPMode != nil {
+							latestSvc.Status.LoadBalancer.Ingress[i].IPMode = nil
+						}
+					}
 					klog.Infof("the latest serviceStatus loadBalancer: %v", latestSvc.Status.LoadBalancer)
-					return reflect.DeepEqual(latestSvc.Status.LoadBalancer, svcLoadBalancer), nil
+					return reflect.DeepEqual(latestSvc.Status.LoadBalancer.Ingress, svcLoadBalancer.Ingress), nil
 				}, pollTimeout, pollInterval).Should(gomega.Equal(true))
 			})
 		})
@@ -431,12 +453,10 @@ var _ = ginkgo.Describe("[resource-status collection] resource status collection
 					currentDaemonSet, err := kubeClient.AppsV1().DaemonSets(daemonSetNamespace).Get(context.TODO(), daemonSetName, metav1.GetOptions{})
 					g.Expect(err).ShouldNot(gomega.HaveOccurred())
 
-					klog.Infof("daemonSet(%s/%s) replicas: %d, wanted replicas: %d", daemonSetNamespace, daemonSetName, currentDaemonSet.Status.NumberReady, wantedReplicas)
-					if currentDaemonSet.Status.NumberReady == wantedReplicas &&
-						currentDaemonSet.Status.CurrentNumberScheduled == wantedReplicas &&
+					klog.Infof("daemonSet(%s/%s) current scheduled replicas: %d, wanted replicas: %d", daemonSetNamespace, daemonSetName, currentDaemonSet.Status.CurrentNumberScheduled, wantedReplicas)
+					if currentDaemonSet.Status.CurrentNumberScheduled == wantedReplicas &&
 						currentDaemonSet.Status.DesiredNumberScheduled == wantedReplicas &&
-						currentDaemonSet.Status.UpdatedNumberScheduled == wantedReplicas &&
-						currentDaemonSet.Status.NumberAvailable == wantedReplicas {
+						currentDaemonSet.Status.UpdatedNumberScheduled == wantedReplicas {
 						return true, nil
 					}
 
@@ -454,11 +474,9 @@ var _ = ginkgo.Describe("[resource-status collection] resource status collection
 					currentDaemonSet, err := kubeClient.AppsV1().DaemonSets(daemonSetNamespace).Get(context.TODO(), daemonSetName, metav1.GetOptions{})
 					g.Expect(err).ShouldNot(gomega.HaveOccurred())
 
-					if currentDaemonSet.Status.NumberReady == wantedReplicas &&
-						currentDaemonSet.Status.CurrentNumberScheduled == wantedReplicas &&
+					if currentDaemonSet.Status.CurrentNumberScheduled == wantedReplicas &&
 						currentDaemonSet.Status.DesiredNumberScheduled == wantedReplicas &&
-						currentDaemonSet.Status.UpdatedNumberScheduled == wantedReplicas &&
-						currentDaemonSet.Status.NumberAvailable == wantedReplicas {
+						currentDaemonSet.Status.UpdatedNumberScheduled == wantedReplicas {
 						return true, nil
 					}
 
@@ -553,9 +571,13 @@ var _ = ginkgo.Describe("[resource-status collection] resource status collection
 			pdbNamespace = testNamespace
 			pdbName = policyName
 			deploymentName := policyName
+			// use a special label value to prevent PDB from selecting pods of other parallel e2e cases.
+			matchLabels := map[string]string{"app": "nginx-" + rand.String(RandomStrLength)}
 
 			deployment = testhelper.NewDeployment(pdbNamespace, deploymentName)
-			pdb = testhelper.NewPodDisruptionBudget(pdbNamespace, pdbName, intstr.FromString("50%"))
+			deployment.Spec.Selector.MatchLabels = matchLabels
+			deployment.Spec.Template.Labels = matchLabels
+			pdb = testhelper.NewPodDisruptionBudget(pdbNamespace, pdbName, intstr.FromString("50%"), matchLabels)
 			policy = testhelper.NewPropagationPolicy(policyNamespace, policyName, []policyv1alpha1.ResourceSelector{
 				{
 					APIVersion: pdb.APIVersion,

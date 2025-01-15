@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package util
 
 import (
@@ -213,14 +229,46 @@ func TestDedupeAndMergeLabels(t *testing.T) {
 
 func TestRemoveLabel(t *testing.T) {
 	type args struct {
-		obj      *unstructured.Unstructured
-		labelKey string
+		obj       *unstructured.Unstructured
+		labelKeys []string
 	}
 	tests := []struct {
 		name     string
 		args     args
 		expected *unstructured.Unstructured
 	}{
+		{
+			name: "empty labelKeys",
+			args: args{
+				obj: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "apps/v1",
+						"kind":       "Deployment",
+						"metadata": map[string]interface{}{
+							"name":   "demo-deployment",
+							"labels": map[string]interface{}{"foo": "bar"},
+						},
+						"spec": map[string]interface{}{
+							"replicas": 2,
+						},
+					},
+				},
+				labelKeys: []string{},
+			},
+			expected: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "apps/v1",
+					"kind":       "Deployment",
+					"metadata": map[string]interface{}{
+						"name":   "demo-deployment",
+						"labels": map[string]interface{}{"foo": "bar"},
+					},
+					"spec": map[string]interface{}{
+						"replicas": 2,
+					},
+				},
+			},
+		},
 		{
 			name: "nil object labels",
 			args: args{
@@ -233,8 +281,10 @@ func TestRemoveLabel(t *testing.T) {
 						},
 						"spec": map[string]interface{}{
 							"replicas": 2,
-						}}},
-				labelKey: "foo",
+						},
+					},
+				},
+				labelKeys: []string{"foo"},
 			},
 			expected: &unstructured.Unstructured{
 				Object: map[string]interface{}{
@@ -245,10 +295,12 @@ func TestRemoveLabel(t *testing.T) {
 					},
 					"spec": map[string]interface{}{
 						"replicas": 2,
-					}}},
+					},
+				},
+			},
 		},
 		{
-			name: "same labelKey",
+			name: "same labelKeys",
 			args: args{
 				obj: &unstructured.Unstructured{
 					Object: map[string]interface{}{
@@ -260,8 +312,10 @@ func TestRemoveLabel(t *testing.T) {
 						},
 						"spec": map[string]interface{}{
 							"replicas": 2,
-						}}},
-				labelKey: "foo",
+						},
+					},
+				},
+				labelKeys: []string{"foo"},
 			},
 			expected: &unstructured.Unstructured{
 				Object: map[string]interface{}{
@@ -273,10 +327,12 @@ func TestRemoveLabel(t *testing.T) {
 					},
 					"spec": map[string]interface{}{
 						"replicas": 2,
-					}}},
+					},
+				},
+			},
 		},
 		{
-			name: "different labelKey",
+			name: "different labelKeys",
 			args: args{
 				obj: &unstructured.Unstructured{
 					Object: map[string]interface{}{
@@ -288,8 +344,10 @@ func TestRemoveLabel(t *testing.T) {
 						},
 						"spec": map[string]interface{}{
 							"replicas": 2,
-						}}},
-				labelKey: "foo1",
+						},
+					},
+				},
+				labelKeys: []string{"foo1"},
 			},
 			expected: &unstructured.Unstructured{
 				Object: map[string]interface{}{
@@ -301,12 +359,78 @@ func TestRemoveLabel(t *testing.T) {
 					},
 					"spec": map[string]interface{}{
 						"replicas": 2,
-					}}},
+					},
+				},
+			},
+		},
+		{
+			name: "same labelKeys of different length",
+			args: args{
+				obj: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "apps/v1",
+						"kind":       "Deployment",
+						"metadata": map[string]interface{}{
+							"name":   "demo-deployment",
+							"labels": map[string]interface{}{"foo": "bar", "foo1": "bar1"},
+						},
+						"spec": map[string]interface{}{
+							"replicas": 2,
+						},
+					},
+				},
+				labelKeys: []string{"foo", "foo1"},
+			},
+			expected: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "apps/v1",
+					"kind":       "Deployment",
+					"metadata": map[string]interface{}{
+						"name":   "demo-deployment",
+						"labels": map[string]interface{}{},
+					},
+					"spec": map[string]interface{}{
+						"replicas": 2,
+					},
+				},
+			},
+		},
+		{
+			name: "different labelKeys of different length",
+			args: args{
+				obj: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "apps/v1",
+						"kind":       "Deployment",
+						"metadata": map[string]interface{}{
+							"name":   "demo-deployment",
+							"labels": map[string]interface{}{"foo": "bar", "foo1": "bar1"},
+						},
+						"spec": map[string]interface{}{
+							"replicas": 2,
+						},
+					},
+				},
+				labelKeys: []string{"foo2", "foo3"},
+			},
+			expected: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "apps/v1",
+					"kind":       "Deployment",
+					"metadata": map[string]interface{}{
+						"name":   "demo-deployment",
+						"labels": map[string]interface{}{"foo": "bar", "foo1": "bar1"},
+					},
+					"spec": map[string]interface{}{
+						"replicas": 2,
+					},
+				},
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			RemoveLabel(tt.args.obj, tt.args.labelKey)
+			RemoveLabels(tt.args.obj, tt.args.labelKeys...)
 			if !reflect.DeepEqual(tt.args.obj, tt.expected) {
 				t.Errorf("RemoveLabel() = %v, want %v", tt.args.obj, tt.expected)
 			}
@@ -544,7 +668,7 @@ func TestRecordManagedLabels(t *testing.T) {
 			},
 		},
 		{
-			name: "object has has labels",
+			name: "object has labels",
 			object: &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"apiVersion": "apps/v1",

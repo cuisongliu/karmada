@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package options
 
 import (
@@ -13,8 +29,6 @@ type ModifyOptions func(option *Options)
 func New(modifyOptions ModifyOptions) Options {
 	option := Options{
 		ClusterName: "testCluster",
-		BindAddress: "0.0.0.0",
-		SecurePort:  10100,
 		ServerPort:  8088,
 	}
 
@@ -44,18 +58,6 @@ func TestValidateKarmadaSchedulerEstimator(t *testing.T) {
 				option.ClusterName = ""
 			}),
 			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ClusterName"), "", "clusterName cannot be empty")},
-		},
-		"invalid BindAddress": {
-			opt: New(func(option *Options) {
-				option.BindAddress = "127.0.0.1:8082"
-			}),
-			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("BindAddress"), "127.0.0.1:8082", "not a valid textual representation of an IP address")},
-		},
-		"invalid SecurePort": {
-			opt: New(func(option *Options) {
-				option.SecurePort = 908188
-			}),
-			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("SecurePort"), 908188, "must be a valid port between 0 and 65535 inclusive")},
 		},
 		"invalid ServerPort": {
 			opt: New(func(option *Options) {

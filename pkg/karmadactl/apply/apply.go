@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package apply
 
 import (
@@ -10,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	kubectlapply "k8s.io/kubectl/pkg/cmd/apply"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -19,6 +35,7 @@ import (
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util"
+	utilcomp "github.com/karmada-io/karmada/pkg/karmadactl/util/completion"
 	"github.com/karmada-io/karmada/pkg/util/names"
 )
 
@@ -28,6 +45,7 @@ var metadataAccessor = meta.NewAccessor()
 type CommandApplyOptions struct {
 	// apply flags
 	KubectlApplyFlags *kubectlapply.ApplyFlags
+	UtilFactory       util.Factory
 	AllClusters       bool
 	Clusters          []string
 
@@ -64,9 +82,10 @@ var (
 )
 
 // NewCmdApply creates the `apply` command
-func NewCmdApply(f util.Factory, parentCommand string, streams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdApply(f util.Factory, parentCommand string, streams genericiooptions.IOStreams) *cobra.Command {
 	o := &CommandApplyOptions{
-		KubectlApplyFlags: kubectlapply.NewApplyFlags(nil, streams),
+		KubectlApplyFlags: kubectlapply.NewApplyFlags(streams),
+		UtilFactory:       f,
 	}
 	cmd := &cobra.Command{
 		Use:                   "apply (-f FILENAME | -k DIRECTORY)",
@@ -75,6 +94,7 @@ func NewCmdApply(f util.Factory, parentCommand string, streams genericclioptions
 		SilenceUsage:          true,
 		DisableFlagsInUseLine: true,
 		Example:               fmt.Sprintf(applyExample, parentCommand),
+		ValidArgsFunction:     utilcomp.ResourceTypeAndNameCompletionFunc(f),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.Complete(f, cmd, parentCommand, args); err != nil {
 				return err
@@ -92,9 +112,14 @@ func NewCmdApply(f util.Factory, parentCommand string, streams genericclioptions
 	o.KubectlApplyFlags.AddFlags(cmd)
 	flags := cmd.Flags()
 	options.AddKubeConfigFlags(flags)
-	flags.StringVarP(options.DefaultConfigFlags.Namespace, "namespace", "n", *options.DefaultConfigFlags.Namespace, "If present, the namespace scope for this CLI request")
+	options.AddNamespaceFlag(flags)
 	flags.BoolVarP(&o.AllClusters, "all-clusters", "", o.AllClusters, "If present, propagates a group of resources to all member clusters.")
 	flags.StringSliceVarP(&o.Clusters, "cluster", "C", o.Clusters, "If present, propagates a group of resources to specified clusters.")
+
+	utilcomp.RegisterCompletionFuncForKarmadaContextFlag(cmd)
+	utilcomp.RegisterCompletionFuncForNamespaceFlag(cmd, f)
+	utilcomp.RegisterCompletionFuncForClusterFlag(cmd)
+
 	return cmd
 }
 
@@ -105,8 +130,7 @@ func (o *CommandApplyOptions) Complete(f util.Factory, cmd *cobra.Command, paren
 		return err
 	}
 	o.karmadaClient = karmadaClient
-	o.KubectlApplyFlags.Factory = f
-	kubectlApplyOptions, err := o.KubectlApplyFlags.ToOptions(cmd, parentCommand, args)
+	kubectlApplyOptions, err := o.KubectlApplyFlags.ToOptions(f, cmd, parentCommand, args)
 	if err != nil {
 		return err
 	}
@@ -171,7 +195,7 @@ func (o *CommandApplyOptions) generateAndInjectPolices() error {
 		if err != nil {
 			return fmt.Errorf("unable to recognize resource: %v", err)
 		}
-		client, err := o.KubectlApplyFlags.Factory.UnstructuredClientForMapping(mapping)
+		client, err := o.UtilFactory.UnstructuredClientForMapping(mapping)
 		if err != nil {
 			return fmt.Errorf("unable to connect to a server to handle %q: %v", mapping.Resource, err)
 		}

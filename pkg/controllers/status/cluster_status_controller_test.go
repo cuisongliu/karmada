@@ -1,3 +1,19 @@
+/*
+Copyright 2023 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package status
 
 import (
@@ -31,6 +47,28 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
+
+// copy from go/src/net/http/internal/testcert/testcert.go
+var testCA = []byte(`-----BEGIN CERTIFICATE-----
+MIIDOTCCAiGgAwIBAgIQSRJrEpBGFc7tNb1fb5pKFzANBgkqhkiG9w0BAQsFADAS
+MRAwDgYDVQQKEwdBY21lIENvMCAXDTcwMDEwMTAwMDAwMFoYDzIwODQwMTI5MTYw
+MDAwWjASMRAwDgYDVQQKEwdBY21lIENvMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A
+MIIBCgKCAQEA6Gba5tHV1dAKouAaXO3/ebDUU4rvwCUg/CNaJ2PT5xLD4N1Vcb8r
+bFSW2HXKq+MPfVdwIKR/1DczEoAGf/JWQTW7EgzlXrCd3rlajEX2D73faWJekD0U
+aUgz5vtrTXZ90BQL7WvRICd7FlEZ6FPOcPlumiyNmzUqtwGhO+9ad1W5BqJaRI6P
+YfouNkwR6Na4TzSj5BrqUfP0FwDizKSJ0XXmh8g8G9mtwxOSN3Ru1QFc61Xyeluk
+POGKBV/q6RBNklTNe0gI8usUMlYyoC7ytppNMW7X2vodAelSu25jgx2anj9fDVZu
+h7AXF5+4nJS4AAt0n1lNY7nGSsdZas8PbQIDAQABo4GIMIGFMA4GA1UdDwEB/wQE
+AwICpDATBgNVHSUEDDAKBggrBgEFBQcDATAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud
+DgQWBBStsdjh3/JCXXYlQryOrL4Sh7BW5TAuBgNVHREEJzAlggtleGFtcGxlLmNv
+bYcEfwAAAYcQAAAAAAAAAAAAAAAAAAAAATANBgkqhkiG9w0BAQsFAAOCAQEAxWGI
+5NhpF3nwwy/4yB4i/CwwSpLrWUa70NyhvprUBC50PxiXav1TeDzwzLx/o5HyNwsv
+cxv3HdkLW59i/0SlJSrNnWdfZ19oTcS+6PtLoVyISgtyN6DpkKpdG1cOkW3Cy2P2
++tK/tKHRP1Y/Ra0RiDpOAmqn0gCOFGz8+lqDIor/T7MTpibL3IxqWfPrvfVRHL3B
+grw/ZQTTIVjjh4JBSW3WyWgNo/ikC1lrVxzl4iPUGptxT36Cr7Zk2Bsg0XqwbOvK
+5d+NTDREkSnUbie4GeutujmX3Dsx88UiV6UY/4lHJa6I5leHUNOHahRbpbWeOfs/
+WkBKOclmOV2xlTVuPw==
+-----END CERTIFICATE-----`)
 
 func TestClusterStatusController_Reconcile(t *testing.T) {
 	tests := []struct {
@@ -85,6 +123,7 @@ func TestClusterStatusController_Reconcile(t *testing.T) {
 			if tt.cluster != nil {
 				// Add a cluster to the fake client.
 				tt.cluster.ObjectMeta.Name = tt.clusterName
+				c.Client = fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithStatusSubresource(tt.cluster).Build()
 
 				if err := c.Client.Create(context.Background(), tt.cluster); err != nil {
 					t.Fatalf("Failed to create cluster: %v", err)
@@ -122,16 +161,13 @@ func generateClusterClient(APIEndpoint string) *util.ClusterClient {
 		&clusterv1alpha1.Cluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "test"},
 			Spec: clusterv1alpha1.ClusterSpec{
-				APIEndpoint:                 APIEndpoint,
-				SecretRef:                   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
-				InsecureSkipTLSVerification: true,
+				APIEndpoint: APIEndpoint,
+				SecretRef:   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
 			},
 		},
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "secret1"},
-			Data: map[string][]byte{
-				clusterv1alpha1.SecretTokenKey: []byte("token"),
-			},
+			Data:       map[string][]byte{clusterv1alpha1.SecretTokenKey: []byte("token"), clusterv1alpha1.SecretCADataKey: testCA},
 		}).Build()
 	clusterClientSet, _ := util.NewClusterClientSet("test", hostClient, nil)
 	clusterClient.KubeClient = clusterClientSet.KubeClient
@@ -156,8 +192,20 @@ func TestClusterStatusController_syncClusterStatus(t *testing.T) {
 		server := mockServer(http.StatusOK, false)
 		defer server.Close()
 		serverAddress = server.URL
+		cluster := &clusterv1alpha1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: clusterv1alpha1.ClusterSpec{
+				APIEndpoint: server.URL,
+				SecretRef:   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
+				ProxyURL:    "http://1.1.1.1",
+			},
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "secret1"},
+			Data:       map[string][]byte{clusterv1alpha1.SecretTokenKey: []byte("token"), clusterv1alpha1.SecretCADataKey: testCA},
+		}
 		c := &ClusterStatusController{
-			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).Build(),
+			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithStatusSubresource(cluster, secret).Build(),
 			GenericInformerManager: genericmanager.GetInstance(),
 			TypedInformerManager:   typedmanager.GetInstance(),
 			ClusterSuccessThreshold: metav1.Duration{
@@ -177,33 +225,30 @@ func TestClusterStatusController_syncClusterStatus(t *testing.T) {
 			ClusterClientSetFunc:        clusterClientSetFuncWithError,
 			ClusterDynamicClientSetFunc: util.NewClusterDynamicClientSetForAgent,
 		}
-
-		cluster := &clusterv1alpha1.Cluster{
-			ObjectMeta: metav1.ObjectMeta{Name: "test"},
-			Spec: clusterv1alpha1.ClusterSpec{
-				APIEndpoint:                 server.URL,
-				SecretRef:                   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
-				InsecureSkipTLSVerification: true,
-				ProxyURL:                    "http://1.1.1.1",
-			},
-		}
-
 		if err := c.Client.Create(context.Background(), cluster); err != nil {
 			t.Fatalf("Failed to create cluster: %v", err)
 		}
-
-		res, err := c.syncClusterStatus(cluster)
-		expect := controllerruntime.Result{}
-		assert.Equal(t, expect, res)
+		err := c.syncClusterStatus(context.Background(), cluster)
 		assert.Empty(t, err)
 	})
-
 	t.Run("online is false, readyCondition.Status isn't true", func(t *testing.T) {
 		server := mockServer(http.StatusNotFound, true)
 		defer server.Close()
 		serverAddress = server.URL
+		cluster := &clusterv1alpha1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: clusterv1alpha1.ClusterSpec{
+				APIEndpoint: server.URL,
+				SecretRef:   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
+				ProxyURL:    "http://1.1.1.2",
+			},
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "secret1"},
+			Data:       map[string][]byte{clusterv1alpha1.SecretTokenKey: []byte("token"), clusterv1alpha1.SecretCADataKey: testCA},
+		}
 		c := &ClusterStatusController{
-			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).Build(),
+			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithStatusSubresource(cluster, secret).Build(),
 			GenericInformerManager: genericmanager.GetInstance(),
 			TypedInformerManager:   typedmanager.GetInstance(),
 			ClusterSuccessThreshold: metav1.Duration{
@@ -224,23 +269,11 @@ func TestClusterStatusController_syncClusterStatus(t *testing.T) {
 			ClusterDynamicClientSetFunc: util.NewClusterDynamicClientSetForAgent,
 		}
 
-		cluster := &clusterv1alpha1.Cluster{
-			ObjectMeta: metav1.ObjectMeta{Name: "test"},
-			Spec: clusterv1alpha1.ClusterSpec{
-				APIEndpoint:                 server.URL,
-				SecretRef:                   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
-				InsecureSkipTLSVerification: true,
-				ProxyURL:                    "http://1.1.1.1",
-			},
-		}
-
 		if err := c.Client.Create(context.Background(), cluster); err != nil {
 			t.Fatalf("Failed to create cluster: %v", err)
 		}
 
-		res, err := c.syncClusterStatus(cluster)
-		expect := controllerruntime.Result{}
-		assert.Equal(t, expect, res)
+		err := c.syncClusterStatus(context.Background(), cluster)
 		assert.Empty(t, err)
 	})
 
@@ -248,8 +281,20 @@ func TestClusterStatusController_syncClusterStatus(t *testing.T) {
 		server := mockServer(http.StatusOK, false)
 		defer server.Close()
 		serverAddress = server.URL
+		cluster := &clusterv1alpha1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: clusterv1alpha1.ClusterSpec{
+				APIEndpoint: server.URL,
+				SecretRef:   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
+				ProxyURL:    "http://1.1.1.1",
+			},
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "secret1"},
+			Data:       map[string][]byte{clusterv1alpha1.SecretTokenKey: []byte("token"), clusterv1alpha1.SecretCADataKey: testCA},
+		}
 		c := &ClusterStatusController{
-			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).Build(),
+			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithStatusSubresource(cluster, secret).Build(),
 			GenericInformerManager: genericmanager.GetInstance(),
 			TypedInformerManager:   typedmanager.GetInstance(),
 			ClusterSuccessThreshold: metav1.Duration{
@@ -270,24 +315,10 @@ func TestClusterStatusController_syncClusterStatus(t *testing.T) {
 			ClusterDynamicClientSetFunc: util.NewClusterDynamicClientSetForAgent,
 		}
 
-		cluster := &clusterv1alpha1.Cluster{
-			ObjectMeta: metav1.ObjectMeta{Name: "test"},
-			Spec: clusterv1alpha1.ClusterSpec{
-				APIEndpoint:                 server.URL,
-				SecretRef:                   &clusterv1alpha1.LocalSecretReference{Namespace: "ns1", Name: "secret1"},
-				InsecureSkipTLSVerification: true,
-				ProxyURL:                    "http://1.1.1.1",
-				SyncMode:                    clusterv1alpha1.Pull,
-			},
-		}
-
 		if err := c.Client.Create(context.Background(), cluster); err != nil {
 			t.Fatalf("Failed to create cluster: %v", err)
 		}
-
-		res, err := c.syncClusterStatus(cluster)
-		expect := controllerruntime.Result{}
-		assert.Equal(t, expect, res)
+		err := c.syncClusterStatus(context.Background(), cluster)
 		assert.Empty(t, err)
 	})
 }
@@ -584,12 +615,12 @@ func TestGetAllocatableModelings(t *testing.T) {
 							Grade: 0,
 							Ranges: []clusterv1alpha1.ResourceModelRange{
 								{
-									Name: clusterv1alpha1.ResourceCPU,
+									Name: corev1.ResourceCPU,
 									Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1, resource.DecimalSI),
 								},
 								{
-									Name: clusterv1alpha1.ResourceMemory,
+									Name: corev1.ResourceMemory,
 									Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1024, resource.DecimalSI),
 								},
@@ -599,12 +630,12 @@ func TestGetAllocatableModelings(t *testing.T) {
 							Grade: 1,
 							Ranges: []clusterv1alpha1.ResourceModelRange{
 								{
-									Name: clusterv1alpha1.ResourceCPU,
+									Name: corev1.ResourceCPU,
 									Min:  *resource.NewMilliQuantity(1, resource.DecimalSI),
 									Max:  *resource.NewQuantity(2, resource.DecimalSI),
 								},
 								{
-									Name: clusterv1alpha1.ResourceMemory,
+									Name: corev1.ResourceMemory,
 									Min:  *resource.NewMilliQuantity(1024, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1024*2, resource.DecimalSI),
 								},
@@ -696,12 +727,12 @@ func TestGetAllocatableModelings(t *testing.T) {
 							Grade: 0,
 							Ranges: []clusterv1alpha1.ResourceModelRange{
 								{
-									Name: clusterv1alpha1.ResourceCPU,
+									Name: corev1.ResourceCPU,
 									Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1, resource.DecimalSI),
 								},
 								{
-									Name: clusterv1alpha1.ResourceMemory,
+									Name: corev1.ResourceMemory,
 									Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1024, resource.DecimalSI),
 								},
@@ -711,7 +742,7 @@ func TestGetAllocatableModelings(t *testing.T) {
 							Grade: 1,
 							Ranges: []clusterv1alpha1.ResourceModelRange{
 								{
-									Name: clusterv1alpha1.ResourceCPU,
+									Name: corev1.ResourceCPU,
 									Min:  *resource.NewMilliQuantity(1, resource.DecimalSI),
 									Max:  *resource.NewQuantity(2, resource.DecimalSI),
 								},
@@ -763,12 +794,12 @@ func TestGetAllocatableModelings(t *testing.T) {
 							Grade: 0,
 							Ranges: []clusterv1alpha1.ResourceModelRange{
 								{
-									Name: clusterv1alpha1.ResourceCPU,
+									Name: corev1.ResourceCPU,
 									Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1, resource.DecimalSI),
 								},
 								{
-									Name: clusterv1alpha1.ResourceMemory,
+									Name: corev1.ResourceMemory,
 									Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1024, resource.DecimalSI),
 								},
@@ -778,12 +809,12 @@ func TestGetAllocatableModelings(t *testing.T) {
 							Grade: 1,
 							Ranges: []clusterv1alpha1.ResourceModelRange{
 								{
-									Name: clusterv1alpha1.ResourceCPU,
+									Name: corev1.ResourceCPU,
 									Min:  *resource.NewMilliQuantity(1, resource.DecimalSI),
 									Max:  *resource.NewQuantity(2, resource.DecimalSI),
 								},
 								{
-									Name: clusterv1alpha1.ResourceMemory,
+									Name: corev1.ResourceMemory,
 									Min:  *resource.NewMilliQuantity(1024, resource.DecimalSI),
 									Max:  *resource.NewQuantity(1024*2, resource.DecimalSI),
 								},
@@ -829,12 +860,12 @@ func TestClusterStatusController_updateStatusIfNeeded(t *testing.T) {
 						Grade: 0,
 						Ranges: []clusterv1alpha1.ResourceModelRange{
 							{
-								Name: clusterv1alpha1.ResourceCPU,
+								Name: corev1.ResourceCPU,
 								Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 								Max:  *resource.NewQuantity(1, resource.DecimalSI),
 							},
 							{
-								Name: clusterv1alpha1.ResourceMemory,
+								Name: corev1.ResourceMemory,
 								Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 								Max:  *resource.NewQuantity(1024, resource.DecimalSI),
 							},
@@ -844,12 +875,12 @@ func TestClusterStatusController_updateStatusIfNeeded(t *testing.T) {
 						Grade: 1,
 						Ranges: []clusterv1alpha1.ResourceModelRange{
 							{
-								Name: clusterv1alpha1.ResourceCPU,
+								Name: corev1.ResourceCPU,
 								Min:  *resource.NewMilliQuantity(1, resource.DecimalSI),
 								Max:  *resource.NewQuantity(2, resource.DecimalSI),
 							},
 							{
-								Name: clusterv1alpha1.ResourceMemory,
+								Name: corev1.ResourceMemory,
 								Min:  *resource.NewMilliQuantity(1024, resource.DecimalSI),
 								Max:  *resource.NewQuantity(1024*2, resource.DecimalSI),
 							},
@@ -866,7 +897,7 @@ func TestClusterStatusController_updateStatusIfNeeded(t *testing.T) {
 		c := &ClusterStatusController{
 			Client: fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(
 				cluster,
-			).Build(),
+			).WithStatusSubresource(cluster).Build(),
 			GenericInformerManager: genericmanager.GetInstance(),
 			TypedInformerManager:   typedmanager.GetInstance(),
 			ClusterClientOption: &util.ClientOption{
@@ -876,8 +907,7 @@ func TestClusterStatusController_updateStatusIfNeeded(t *testing.T) {
 			ClusterClientSetFunc: util.NewClusterClientSet,
 		}
 
-		actual, err := c.updateStatusIfNeeded(cluster, currentClusterStatus)
-		assert.Equal(t, controllerruntime.Result{}, actual)
+		err := c.updateStatusIfNeeded(context.Background(), cluster, currentClusterStatus)
 		assert.Empty(t, err, "updateStatusIfNeeded returns error")
 	})
 
@@ -896,12 +926,12 @@ func TestClusterStatusController_updateStatusIfNeeded(t *testing.T) {
 						Grade: 0,
 						Ranges: []clusterv1alpha1.ResourceModelRange{
 							{
-								Name: clusterv1alpha1.ResourceCPU,
+								Name: corev1.ResourceCPU,
 								Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 								Max:  *resource.NewQuantity(1, resource.DecimalSI),
 							},
 							{
-								Name: clusterv1alpha1.ResourceMemory,
+								Name: corev1.ResourceMemory,
 								Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 								Max:  *resource.NewQuantity(1024, resource.DecimalSI),
 							},
@@ -911,12 +941,12 @@ func TestClusterStatusController_updateStatusIfNeeded(t *testing.T) {
 						Grade: 1,
 						Ranges: []clusterv1alpha1.ResourceModelRange{
 							{
-								Name: clusterv1alpha1.ResourceCPU,
+								Name: corev1.ResourceCPU,
 								Min:  *resource.NewMilliQuantity(1, resource.DecimalSI),
 								Max:  *resource.NewQuantity(2, resource.DecimalSI),
 							},
 							{
-								Name: clusterv1alpha1.ResourceMemory,
+								Name: corev1.ResourceMemory,
 								Min:  *resource.NewMilliQuantity(1024, resource.DecimalSI),
 								Max:  *resource.NewQuantity(1024*2, resource.DecimalSI),
 							},
@@ -941,19 +971,17 @@ func TestClusterStatusController_updateStatusIfNeeded(t *testing.T) {
 			ClusterClientSetFunc: util.NewClusterClientSet,
 		}
 
-		actual, err := c.updateStatusIfNeeded(cluster, currentClusterStatus)
-		expect := controllerruntime.Result{Requeue: true}
-		assert.Equal(t, expect, actual)
+		err := c.updateStatusIfNeeded(context.Background(), cluster, currentClusterStatus)
 		assert.NotEmpty(t, err, "updateStatusIfNeeded doesn't return error")
 	})
 }
 
-func NewClusterDynamicClientSetForAgentWithError(clusterName string, client client.Client) (*util.DynamicClusterClient, error) {
+func NewClusterDynamicClientSetForAgentWithError(_ string, _ client.Client) (*util.DynamicClusterClient, error) {
 	return nil, fmt.Errorf("err")
 }
 
 func TestClusterStatusController_initializeGenericInformerManagerForCluster(t *testing.T) {
-	t.Run("failed to create dynamicClient", func(t *testing.T) {
+	t.Run("failed to create dynamicClient", func(*testing.T) {
 		c := &ClusterStatusController{
 			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).Build(),
 			GenericInformerManager: genericmanager.GetInstance(),
@@ -972,7 +1000,7 @@ func TestClusterStatusController_initializeGenericInformerManagerForCluster(t *t
 		c.initializeGenericInformerManagerForCluster(clusterClientSet)
 	})
 
-	t.Run("suc to create dynamicClient", func(t *testing.T) {
+	t.Run("suc to create dynamicClient", func(*testing.T) {
 		c := &ClusterStatusController{
 			Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).Build(),
 			GenericInformerManager: genericmanager.GetInstance(),
@@ -992,7 +1020,7 @@ func TestClusterStatusController_initializeGenericInformerManagerForCluster(t *t
 	})
 }
 
-func TestClusterStatusController_initLeaseController(t *testing.T) {
+func TestClusterStatusController_initLeaseController(_ *testing.T) {
 	c := &ClusterStatusController{
 		Client:                 fake.NewClientBuilder().WithScheme(gclient.NewSchema()).Build(),
 		GenericInformerManager: genericmanager.GetInstance(),
@@ -1019,12 +1047,12 @@ func TestClusterStatusController_initLeaseController(t *testing.T) {
 					Grade: 0,
 					Ranges: []clusterv1alpha1.ResourceModelRange{
 						{
-							Name: clusterv1alpha1.ResourceCPU,
+							Name: corev1.ResourceCPU,
 							Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 							Max:  *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						{
-							Name: clusterv1alpha1.ResourceMemory,
+							Name: corev1.ResourceMemory,
 							Min:  *resource.NewMilliQuantity(0, resource.DecimalSI),
 							Max:  *resource.NewQuantity(1024, resource.DecimalSI),
 						},
@@ -1034,12 +1062,12 @@ func TestClusterStatusController_initLeaseController(t *testing.T) {
 					Grade: 1,
 					Ranges: []clusterv1alpha1.ResourceModelRange{
 						{
-							Name: clusterv1alpha1.ResourceCPU,
+							Name: corev1.ResourceCPU,
 							Min:  *resource.NewMilliQuantity(1, resource.DecimalSI),
 							Max:  *resource.NewQuantity(2, resource.DecimalSI),
 						},
 						{
-							Name: clusterv1alpha1.ResourceMemory,
+							Name: corev1.ResourceMemory,
 							Min:  *resource.NewMilliQuantity(1024, resource.DecimalSI),
 							Max:  *resource.NewQuantity(1024*2, resource.DecimalSI),
 						},
@@ -1059,7 +1087,7 @@ func mockServer(statusCode int, existError bool) *httptest.Server {
 		Body:       io.NopCloser(bytes.NewBufferString(respBody)),
 	}
 	// Create an HTTP test server to handle the request
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Write the response to the client
 		if existError {
 			statusCode := statusCode

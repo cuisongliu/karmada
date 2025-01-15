@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package options
 
 import (
@@ -23,11 +39,6 @@ type Options struct {
 	Controllers []string
 	// LeaderElection defines the configuration of leader election client.
 	LeaderElection componentbaseconfig.LeaderElectionConfiguration
-	// BindAddress is the IP address on which to listen for the --secure-port port.
-	BindAddress string
-	// SecurePort is the port that the the server serves at.
-	// Note: We hope support https in the future once controller-runtime provides the functionality.
-	SecurePort int
 	// KubeAPIQPS is the QPS to use while talking with karmada-apiserver.
 	KubeAPIQPS float32
 	// KubeAPIBurst is the burst to allow while talking with karmada-apiserver.
@@ -40,6 +51,10 @@ type Options struct {
 	// It can be set to "0" to disable the metrics serving.
 	// Defaults to ":8080".
 	MetricsBindAddress string
+	// HealthProbeBindAddress is the TCP address that the controller should bind to
+	// for serving health probes
+	// It can be set to "0" or "" to disable serving the health probe.
+	HealthProbeBindAddress string
 	// ConcurrentKarmadaSyncs is the number of karmada objects that are allowed to sync concurrently.
 	ConcurrentKarmadaSyncs int
 }
@@ -57,8 +72,6 @@ func NewOptions() *Options {
 			ResourceNamespace: "karmada-system",
 			ResourceName:      "karmada-operator",
 		},
-		BindAddress:            "0.0.0.0",
-		SecurePort:             8443,
 		KubeAPIQPS:             50,
 		KubeAPIBurst:           100,
 		ConcurrentKarmadaSyncs: 5,
@@ -68,6 +81,8 @@ func NewOptions() *Options {
 
 // AddFlags adds flags to the specified FlagSet.
 func (o *Options) AddFlags(fs *pflag.FlagSet, allControllers []string, disabledByDefaultControllers []string) {
+	fs.StringVar(&o.MetricsBindAddress, "metrics-bind-address", ":8080", "The TCP address that the controller should bind to for serving prometheus metrics(e.g. 127.0.0.1:8080, :8080). It can be set to \"0\" to disable the metrics serving.")
+	fs.StringVar(&o.HealthProbeBindAddress, "health-probe-bind-address", ":8443", "The TCP address that the controller should bind to for serving health probes(e.g. 127.0.0.1:8443, :8443). It can be set to \"0\" or \"\" to disable serving the health probe.")
 	fs.DurationVar(&o.ResyncPeriod.Duration, "resync-period", o.ResyncPeriod.Duration, "ResyncPeriod determines the minimum frequency at which watched resources are reconciled.")
 	fs.Float32Var(&o.KubeAPIQPS, "kube-api-qps", o.KubeAPIQPS, "QPS to use while talking with kubernetes apiserver.")
 	fs.Int32Var(&o.KubeAPIBurst, "kube-api-burst", o.KubeAPIBurst, "Burst to use while talking with kubernetes apiserver.")

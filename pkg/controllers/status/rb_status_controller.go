@@ -1,3 +1,19 @@
+/*
+Copyright 2023 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package status
 
 import (
@@ -14,7 +30,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	workv1alpha1 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
@@ -24,7 +39,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
 
-// RBStatusControllerName is the controller name that will be used when reporting events.
+// RBStatusControllerName is the controller name that will be used when reporting events and metrics.
 const RBStatusControllerName = "resource-binding-status-controller"
 
 // RBStatusController is to sync status of ResourceBinding
@@ -52,7 +67,7 @@ func (c *RBStatusController) Reconcile(ctx context.Context, req controllerruntim
 			return controllerruntime.Result{}, nil
 		}
 
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	// The rb is being deleted, in which case we stop processing.
@@ -60,9 +75,9 @@ func (c *RBStatusController) Reconcile(ctx context.Context, req controllerruntim
 		return controllerruntime.Result{}, nil
 	}
 
-	err := c.syncBindingStatus(binding)
+	err := c.syncBindingStatus(ctx, binding)
 	if err != nil {
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 	return controllerruntime.Result{}, nil
 }
@@ -70,7 +85,7 @@ func (c *RBStatusController) Reconcile(ctx context.Context, req controllerruntim
 // SetupWithManager creates a controller and register to controller manager.
 func (c *RBStatusController) SetupWithManager(mgr controllerruntime.Manager) error {
 	workMapFunc := handler.MapFunc(
-		func(workObj client.Object) []reconcile.Request {
+		func(_ context.Context, workObj client.Object) []reconcile.Request {
 			var requests []reconcile.Request
 
 			annotations := workObj.GetAnnotations()
@@ -88,36 +103,26 @@ func (c *RBStatusController) SetupWithManager(mgr controllerruntime.Manager) err
 			return requests
 		})
 
-	return controllerruntime.NewControllerManagedBy(mgr).Named("resourceBinding_status_controller").
-		Watches(&source.Kind{Type: &workv1alpha1.Work{}}, handler.EnqueueRequestsFromMapFunc(workMapFunc), workPredicateFn).
-		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter(c.RateLimiterOptions)}).
+	return controllerruntime.NewControllerManagedBy(mgr).
+		Named(RBStatusControllerName).
+		For(&workv1alpha2.ResourceBinding{}, bindingPredicateFn).
+		Watches(&workv1alpha1.Work{}, handler.EnqueueRequestsFromMapFunc(workMapFunc), workPredicateFn).
+		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](c.RateLimiterOptions)}).
 		Complete(c)
 }
 
-func (c *RBStatusController) syncBindingStatus(binding *workv1alpha2.ResourceBinding) error {
-	resourceTemplate, err := helper.FetchResourceTemplate(c.DynamicClient, c.InformerManager, c.RESTMapper, binding.Spec.Resource)
+func (c *RBStatusController) syncBindingStatus(ctx context.Context, binding *workv1alpha2.ResourceBinding) error {
+	err := helper.AggregateResourceBindingWorkStatus(ctx, c.Client, binding, c.EventRecorder)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			// It might happen when the resource template has been removed but the garbage collector hasn't removed
-			// the ResourceBinding which dependent on resource template.
-			// So, just return without retry(requeue) would save unnecessary loop.
-			return nil
-		}
-		klog.Errorf("Failed to fetch workload for resourceBinding(%s/%s). Error: %v.",
-			binding.GetNamespace(), binding.GetName(), err)
-		return err
-	}
-
-	err = helper.AggregateResourceBindingWorkStatus(c.Client, binding, resourceTemplate, c.EventRecorder)
-	if err != nil {
-		klog.Errorf("Failed to aggregate workStatues to resourceBinding(%s/%s), Error: %v",
+		klog.Errorf("Failed to aggregate workStatus to resourceBinding(%s/%s), Error: %v",
 			binding.Namespace, binding.Name, err)
 		return err
 	}
 
-	err = updateResourceStatus(c.DynamicClient, c.RESTMapper, c.ResourceInterpreter, resourceTemplate, binding.Status)
+	err = updateResourceStatus(ctx, c.DynamicClient, c.RESTMapper, c.ResourceInterpreter, c.EventRecorder, binding.Spec.Resource, binding.Status)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }

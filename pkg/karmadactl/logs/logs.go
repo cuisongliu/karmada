@@ -1,16 +1,34 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package logs
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	kubectllogs "k8s.io/kubectl/pkg/cmd/logs"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util"
+	utilcomp "github.com/karmada-io/karmada/pkg/karmadactl/util/completion"
 )
 
 const (
@@ -51,9 +69,9 @@ var (
 )
 
 // NewCmdLogs new logs command.
-func NewCmdLogs(f util.Factory, parentCommand string, streams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdLogs(f util.Factory, parentCommand string, streams genericiooptions.IOStreams) *cobra.Command {
 	o := &CommandLogsOptions{
-		KubectlLogsOptions: kubectllogs.NewLogsOptions(streams, false),
+		KubectlLogsOptions: kubectllogs.NewLogsOptions(streams),
 	}
 
 	cmd := &cobra.Command{
@@ -63,6 +81,7 @@ func NewCmdLogs(f util.Factory, parentCommand string, streams genericclioptions.
 		SilenceUsage:          true,
 		DisableFlagsInUseLine: true,
 		Example:               fmt.Sprintf(logsExample, parentCommand),
+		ValidArgsFunction:     utilcomp.PodResourceNameAndContainerCompletionFunc(f),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.Complete(cmd, args, f); err != nil {
 				return err
@@ -82,10 +101,13 @@ func NewCmdLogs(f util.Factory, parentCommand string, streams genericclioptions.
 
 	flags := cmd.Flags()
 	options.AddKubeConfigFlags(flags)
-	flags.StringVarP(options.DefaultConfigFlags.Namespace, "namespace", "n", *options.DefaultConfigFlags.Namespace, "If present, the namespace scope for this CLI request")
+	options.AddNamespaceFlag(flags)
 	flags.StringVarP(&o.Cluster, "cluster", "C", "", "Specify a member cluster")
 	o.KubectlLogsOptions.AddFlags(cmd)
 
+	utilcomp.RegisterCompletionFuncForKarmadaContextFlag(cmd)
+	utilcomp.RegisterCompletionFuncForNamespaceFlag(cmd, f)
+	utilcomp.RegisterCompletionFuncForClusterFlag(cmd)
 	return cmd
 }
 
@@ -99,7 +121,7 @@ type CommandLogsOptions struct {
 // Complete ensures that options are valid and marshals them if necessary
 func (o *CommandLogsOptions) Complete(cmd *cobra.Command, args []string, f util.Factory) error {
 	if o.Cluster == "" {
-		return fmt.Errorf("must specify a cluster")
+		return errors.New("must specify a cluster")
 	}
 
 	// print correct usage message when the given arguments are invalid

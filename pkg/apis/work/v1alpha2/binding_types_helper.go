@@ -1,12 +1,33 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package v1alpha2
+
+import policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 
 // TaskOptions represents options for GracefulEvictionTasks.
 type TaskOptions struct {
-	producer           string
-	reason             string
-	message            string
-	gracePeriodSeconds *int32
-	suppressDeletion   *bool
+	purgeMode              policyv1alpha1.PurgeMode
+	producer               string
+	reason                 string
+	message                string
+	gracePeriodSeconds     *int32
+	suppressDeletion       *bool
+	preservedLabelState    map[string]string
+	clustersBeforeFailover []string
 }
 
 // Option configures a TaskOptions
@@ -20,6 +41,13 @@ func NewTaskOptions(opts ...Option) *TaskOptions {
 	}
 
 	return &options
+}
+
+// WithPurgeMode sets the purgeMode for TaskOptions
+func WithPurgeMode(purgeMode policyv1alpha1.PurgeMode) Option {
+	return func(o *TaskOptions) {
+		o.purgeMode = purgeMode
+	}
 }
 
 // WithProducer sets the producer for TaskOptions
@@ -54,6 +82,20 @@ func WithGracePeriodSeconds(gracePeriodSeconds *int32) Option {
 func WithSuppressDeletion(suppressDeletion *bool) Option {
 	return func(o *TaskOptions) {
 		o.suppressDeletion = suppressDeletion
+	}
+}
+
+// WithPreservedLabelState sets the preservedLabelState for TaskOptions
+func WithPreservedLabelState(preservedLabelState map[string]string) Option {
+	return func(o *TaskOptions) {
+		o.preservedLabelState = preservedLabelState
+	}
+}
+
+// WithClustersBeforeFailover sets the clustersBeforeFailover for TaskOptions
+func WithClustersBeforeFailover(clustersBeforeFailover []string) Option {
+	return func(o *TaskOptions) {
+		o.clustersBeforeFailover = clustersBeforeFailover
 	}
 }
 
@@ -137,15 +179,28 @@ func (s *ResourceBindingSpec) GracefulEvictCluster(name string, options *TaskOpt
 	// build eviction task
 	evictingCluster := evictCluster.DeepCopy()
 	evictionTask := GracefulEvictionTask{
-		FromCluster:        evictingCluster.Name,
-		Reason:             options.reason,
-		Message:            options.message,
-		Producer:           options.producer,
-		GracePeriodSeconds: options.gracePeriodSeconds,
-		SuppressDeletion:   options.suppressDeletion,
+		FromCluster:            evictingCluster.Name,
+		PurgeMode:              options.purgeMode,
+		Reason:                 options.reason,
+		Message:                options.message,
+		Producer:               options.producer,
+		GracePeriodSeconds:     options.gracePeriodSeconds,
+		SuppressDeletion:       options.suppressDeletion,
+		PreservedLabelState:    options.preservedLabelState,
+		ClustersBeforeFailover: options.clustersBeforeFailover,
 	}
 	if evictingCluster.Replicas > 0 {
 		evictionTask.Replicas = &evictingCluster.Replicas
 	}
 	s.GracefulEvictionTasks = append(s.GracefulEvictionTasks, evictionTask)
+}
+
+// SchedulingSuspended tells if the scheduling of ResourceBinding or
+// ClusterResourceBinding is suspended.
+func (s *ResourceBindingSpec) SchedulingSuspended() bool {
+	if s == nil || s.Suspension == nil || s.Suspension.Scheduling == nil {
+		return false
+	}
+
+	return *s.Suspension.Scheduling
 }

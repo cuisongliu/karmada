@@ -1,3 +1,19 @@
+/*
+Copyright 2020 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package v1alpha1
 
 import (
@@ -27,7 +43,10 @@ const (
 
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:resource:shortName=pp,categories={karmada-io}
+// +kubebuilder:resource:path=propagationpolicies,scope=Namespaced,shortName=pp,categories={karmada-io}
+// +kubebuilder:printcolumn:JSONPath=`.spec.conflictResolution`,name="CONFLICT-RESOLUTION",type=string
+// +kubebuilder:printcolumn:JSONPath=`.spec.priority`,name="PRIORITY",type=string
+// +kubebuilder:printcolumn:JSONPath=`.metadata.creationTimestamp`,name="AGE",type=date
 
 // PropagationPolicy represents the policy that propagates a group of resources to one or more clusters.
 type PropagationPolicy struct {
@@ -76,6 +95,7 @@ type PropagationSpec struct {
 	// template be processed.
 	// Once a resource template has been claimed by a policy, by default it will
 	// not be preempted by following policies even with a higher priority.
+	// See Preemption for more details.
 	//
 	// In case of two policies have the same priority, the one with a more precise
 	// matching rules in ResourceSelectors wins:
@@ -90,6 +110,14 @@ type PropagationSpec struct {
 	// +optional
 	// +kubebuilder:default=0
 	Priority *int32 `json:"priority,omitempty"`
+
+	// Preemption declares the behaviors for preempting.
+	// Valid options are "Always" and "Never".
+	//
+	// +kubebuilder:default="Never"
+	// +kubebuilder:validation:Enum=Always;Never
+	// +optional
+	Preemption PreemptionBehavior `json:"preemption,omitempty"`
 
 	// DependentOverrides represents the list of overrides(OverridePolicy)
 	// which must present before the current PropagationPolicy takes effect.
@@ -114,6 +142,64 @@ type PropagationSpec struct {
 	// If this value is nil, failover is disabled.
 	// +optional
 	Failover *FailoverBehavior `json:"failover,omitempty"`
+
+	// ConflictResolution declares how potential conflict should be handled when
+	// a resource that is being propagated already exists in the target cluster.
+	//
+	// It defaults to "Abort" which means stop propagating to avoid unexpected
+	// overwrites. The "Overwrite" might be useful when migrating legacy cluster
+	// resources to Karmada, in which case conflict is predictable and can be
+	// instructed to Karmada take over the resource by overwriting.
+	//
+	// +kubebuilder:default="Abort"
+	// +kubebuilder:validation:Enum=Abort;Overwrite
+	// +optional
+	ConflictResolution ConflictResolution `json:"conflictResolution,omitempty"`
+
+	// ActivationPreference indicates how the referencing resource template will
+	// be propagated, in case of policy changes.
+	//
+	// If empty, the resource template will respond to policy changes
+	// immediately, in other words, any policy changes will drive the resource
+	// template to be propagated immediately as per the current propagation rules.
+	//
+	// If the value is 'Lazy' means the policy changes will not take effect for now
+	// but defer to the resource template changes, in other words, the resource
+	// template will not be propagated as per the current propagation rules until
+	// there is an update on it.
+	// This is an experimental feature that might help in a scenario where a policy
+	// manages huge amount of resource templates, changes to a policy typically
+	// affect numerous applications simultaneously. A minor misconfiguration
+	// could lead to widespread failures. With this feature, the change can be
+	// gradually rolled out through iterative modifications of resource templates.
+	//
+	// +kubebuilder:validation:Enum=Lazy
+	// +optional
+	ActivationPreference ActivationPreference `json:"activationPreference,omitempty"`
+
+	// Suspension declares the policy for suspending different aspects of propagation.
+	// nil means no suspension. no default values.
+	// +optional
+	Suspension *Suspension `json:"suspension,omitempty"`
+
+	// PreserveResourcesOnDeletion controls whether resources should be preserved on the
+	// member clusters when the resource template is deleted.
+	// If set to true, resources will be preserved on the member clusters.
+	// Default is false, which means resources will be deleted along with the resource template.
+	//
+	// This setting is particularly useful during workload migration scenarios to ensure
+	// that rollback can occur quickly without affecting the workloads running on the
+	// member clusters.
+	//
+	// Additionally, this setting applies uniformly across all member clusters and will not
+	// selectively control preservation on only some clusters.
+	//
+	// Note: This setting does not apply to the deletion of the policy itself.
+	// When the policy is deleted, the resource templates and their corresponding
+	// propagated resources in member clusters will remain unchanged unless explicitly deleted.
+	//
+	// +optional
+	PreserveResourcesOnDeletion *bool `json:"preserveResourcesOnDeletion,omitempty"`
 }
 
 // ResourceSelector the resources will be selected.
@@ -148,13 +234,44 @@ type FieldSelector struct {
 	MatchExpressions []corev1.NodeSelectorRequirement `json:"matchExpressions,omitempty"`
 }
 
-// PurgeMode represents that how to deal with the legacy applications on the
+// Suspension defines the policy for suspending different aspects of propagation.
+type Suspension struct {
+	// Dispatching controls whether dispatching should be suspended.
+	// nil means not suspend, no default value, only accepts 'true'.
+	// Note: true means stop propagating to all clusters. Can not co-exist
+	// with DispatchingOnClusters which is used to suspend particular clusters.
+	// +optional
+	Dispatching *bool `json:"dispatching,omitempty"`
+
+	// DispatchingOnClusters declares a list of clusters to which the dispatching
+	// should be suspended.
+	// Note: Can not co-exist with Dispatching which is used to suspend all.
+	// +optional
+	DispatchingOnClusters *SuspendClusters `json:"dispatchingOnClusters,omitempty"`
+}
+
+// SuspendClusters represents a group of clusters that should be suspended from propagating.
+// Note: No plan to introduce the label selector or field selector to select clusters yet, as it
+// would make the system unpredictable.
+type SuspendClusters struct {
+	// ClusterNames is the list of clusters to be selected.
+	// +optional
+	ClusterNames []string `json:"clusterNames,omitempty"`
+}
+
+// PurgeMode represents how to deal with the legacy application on the
 // cluster from which the application is migrated.
 type PurgeMode string
 
 const (
 	// Immediately represents that Karmada will immediately evict the legacy
-	// application.
+	// application. This is useful in scenarios where an application can not
+	// tolerate two instances running simultaneously.
+	// For example, the Flink application supports exactly-once state consistency,
+	// which means it requires that no two instances of the application are running
+	// at the same time. During a failover, it is crucial to ensure that the old
+	// application is removed before creating a new one to avoid duplicate
+	// processing and maintaining state consistency.
 	Immediately PurgeMode = "Immediately"
 	// Graciously represents that Karmada will wait for the application to
 	// come back to healthy on the new cluster or after a timeout is reached
@@ -194,6 +311,7 @@ type ApplicationFailoverBehavior struct {
 	// cluster from which the application is migrated.
 	// Valid options are "Immediately", "Graciously" and "Never".
 	// Defaults to "Graciously".
+	// +kubebuilder:validation:Enum=Immediately;Graciously;Never
 	// +kubebuilder:default=Graciously
 	// +optional
 	PurgeMode PurgeMode `json:"purgeMode,omitempty"`
@@ -206,6 +324,23 @@ type ApplicationFailoverBehavior struct {
 	// Value must be positive integer.
 	// +optional
 	GracePeriodSeconds *int32 `json:"gracePeriodSeconds,omitempty"`
+
+	// StatePreservation defines the policy for preserving and restoring state data
+	// during failover events for stateful applications.
+	//
+	// When an application fails over from one cluster to another, this policy enables
+	// the extraction of critical data from the original resource configuration.
+	// Upon successful migration, the extracted data is then re-injected into the new
+	// resource, ensuring that the application can resume operation with its previous
+	// state intact.
+	// This is particularly useful for stateful applications where maintaining data
+	// consistency across failover events is crucial.
+	// If not specified, means no state data will be preserved.
+	//
+	// Note: This requires the StatefulFailoverInjection feature gate to be enabled,
+	// which is alpha.
+	// +optional
+	StatePreservation *StatePreservation `json:"statePreservation,omitempty"`
 }
 
 // DecisionConditions represents the decision conditions of performing the failover process.
@@ -217,6 +352,41 @@ type DecisionConditions struct {
 	// +kubebuilder:default=300
 	// +optional
 	TolerationSeconds *int32 `json:"tolerationSeconds,omitempty"`
+}
+
+// StatePreservation defines the policy for preserving state during failover events.
+type StatePreservation struct {
+	// Rules contains a list of StatePreservationRule configurations.
+	// Each rule specifies a JSONPath expression targeting specific pieces of
+	// state data to be preserved during failover events. An AliasLabelName is associated
+	// with each rule, serving as a label key when the preserved data is passed
+	// to the new cluster.
+	// +required
+	Rules []StatePreservationRule `json:"rules"`
+}
+
+// StatePreservationRule defines a single rule for state preservation.
+// It includes a JSONPath expression and an alias name that will be used
+// as a label key when passing state information to the new cluster.
+type StatePreservationRule struct {
+	// AliasLabelName is the name that will be used as a label key when the preserved
+	// data is passed to the new cluster. This facilitates the injection of the
+	// preserved state back into the application resources during recovery.
+	// +required
+	AliasLabelName string `json:"aliasLabelName"`
+
+	// JSONPath is the JSONPath template used to identify the state data
+	// to be preserved from the original resource configuration.
+	// The JSONPath syntax follows the Kubernetes specification:
+	// https://kubernetes.io/docs/reference/kubectl/jsonpath/
+	//
+	// Note: The JSONPath expression will start searching from the "status" field of
+	// the API resource object by default. For example, to extract the "availableReplicas"
+	// from a Deployment, the JSONPath expression should be "{.availableReplicas}", not
+	// "{.status.availableReplicas}".
+	//
+	// +required
+	JSONPath string `json:"jsonPath"`
 }
 
 // Placement represents the rule for select clusters.
@@ -443,6 +613,53 @@ const (
 	DynamicWeightByAvailableReplicas DynamicWeightFactor = "AvailableReplicas"
 )
 
+// PreemptionBehavior describes whether and how to preempt resources that are
+// claimed by lower-priority PropagationPolicy(ClusterPropagationPolicy).
+// +enum
+type PreemptionBehavior string
+
+const (
+	// PreemptAlways means that preemption is allowed.
+	//
+	// If it is applied to a PropagationPolicy, it can preempt any resource as
+	// per Priority, regardless of whether it has been claimed by a PropagationPolicy
+	// or a ClusterPropagationPolicy, as long as it can match the rules defined
+	// in ResourceSelector. In addition, if a resource has already been claimed
+	// by a ClusterPropagationPolicy, the PropagationPolicy can still preempt it
+	// without considering Priority.
+	//
+	// If it is applied to a ClusterPropagationPolicy, it can only preempt from
+	// ClusterPropagationPolicy, and from PropagationPolicy is not allowed.
+	PreemptAlways PreemptionBehavior = "Always"
+
+	// PreemptNever means that a PropagationPolicy(ClusterPropagationPolicy) never
+	// preempts resources.
+	PreemptNever PreemptionBehavior = "Never"
+)
+
+// ConflictResolution describes how to resolve the conflict during the process
+// of propagation especially the resource already in a member cluster.
+type ConflictResolution string
+
+const (
+	// ConflictOverwrite means that resolve the conflict by overwriting the
+	// resource with the propagating resource template.
+	ConflictOverwrite ConflictResolution = "Overwrite"
+
+	// ConflictAbort means that do not resolve the conflict and stop propagating.
+	ConflictAbort ConflictResolution = "Abort"
+)
+
+// ActivationPreference indicates how the referencing resource template will be propagated, in case of policy changes.
+type ActivationPreference string
+
+const (
+	// LazyActivation means the policy changes will not take effect for now but defer to the resource template changes,
+	// in other words, the resource template will not be propagated as per the current propagation rules until
+	// there is an update on it.
+	LazyActivation ActivationPreference = "Lazy"
+)
+
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // PropagationPolicyList contains a list of PropagationPolicy.
@@ -454,8 +671,11 @@ type PropagationPolicyList struct {
 
 // +genclient
 // +genclient:nonNamespaced
-// +kubebuilder:resource:scope="Cluster",shortName=cpp,categories={karmada-io}
+// +kubebuilder:resource:path=clusterpropagationpolicies,scope="Cluster",shortName=cpp,categories={karmada-io}
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:printcolumn:JSONPath=`.spec.conflictResolution`,name="CONFLICT-RESOLUTION",type=string
+// +kubebuilder:printcolumn:JSONPath=`.spec.priority`,name="PRIORITY",type=string
+// +kubebuilder:printcolumn:JSONPath=`.metadata.creationTimestamp`,name="AGE",type=date
 
 // ClusterPropagationPolicy represents the cluster-wide policy that propagates a group of resources to one or more clusters.
 // Different with PropagationPolicy that could only propagate resources in its own namespace, ClusterPropagationPolicy

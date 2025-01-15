@@ -1,9 +1,29 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/onsi/ginkgo/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/klog/v2"
 
@@ -58,20 +78,20 @@ var _ = ginkgo.Describe("[OverridePolicy] apply overriders testing", func() {
 			}, policyv1alpha1.Overriders{
 				LabelsOverrider: []policyv1alpha1.LabelAnnotationOverrider{
 					{
-						Operator: "replace",
+						Operator: policyv1alpha1.OverriderOpReplace,
 						Value: map[string]string{
 							"foo":       "exist",
 							"non-exist": "non-exist",
 						},
 					},
 					{
-						Operator: "add",
+						Operator: policyv1alpha1.OverriderOpAdd,
 						Value: map[string]string{
 							"app": "nginx",
 						},
 					},
 					{
-						Operator: "remove",
+						Operator: policyv1alpha1.OverriderOpRemove,
 						Value: map[string]string{
 							"bar": "bar",
 						},
@@ -143,20 +163,20 @@ var _ = ginkgo.Describe("[OverridePolicy] apply overriders testing", func() {
 			}, policyv1alpha1.Overriders{
 				AnnotationsOverrider: []policyv1alpha1.LabelAnnotationOverrider{
 					{
-						Operator: "replace",
+						Operator: policyv1alpha1.OverriderOpReplace,
 						Value: map[string]string{
 							"foo":       "exist",
 							"non-exist": "non-exist",
 						},
 					},
 					{
-						Operator: "add",
+						Operator: policyv1alpha1.OverriderOpAdd,
 						Value: map[string]string{
 							"app": "nginx",
 						},
 					},
 					{
-						Operator: "remove",
+						Operator: policyv1alpha1.OverriderOpRemove,
 						Value: map[string]string{
 							"bar": "bar",
 						},
@@ -225,17 +245,17 @@ var _ = ginkgo.Describe("[OverridePolicy] apply overriders testing", func() {
 				ImageOverrider: []policyv1alpha1.ImageOverrider{
 					{
 						Component: "Registry",
-						Operator:  "replace",
+						Operator:  policyv1alpha1.OverriderOpReplace,
 						Value:     "fictional.registry.us",
 					},
 					{
 						Component: "Repository",
-						Operator:  "replace",
+						Operator:  policyv1alpha1.OverriderOpReplace,
 						Value:     "busybox",
 					},
 					{
 						Component: "Tag",
-						Operator:  "replace",
+						Operator:  policyv1alpha1.OverriderOpReplace,
 						Value:     "1.0",
 					},
 				},
@@ -303,17 +323,17 @@ var _ = ginkgo.Describe("[OverridePolicy] apply overriders testing", func() {
 				ImageOverrider: []policyv1alpha1.ImageOverrider{
 					{
 						Component: "Registry",
-						Operator:  "replace",
+						Operator:  policyv1alpha1.OverriderOpReplace,
 						Value:     "fictional.registry.us",
 					},
 					{
 						Component: "Repository",
-						Operator:  "replace",
+						Operator:  policyv1alpha1.OverriderOpReplace,
 						Value:     "busybox",
 					},
 					{
 						Component: "Tag",
-						Operator:  "replace",
+						Operator:  policyv1alpha1.OverriderOpReplace,
 						Value:     "1.0",
 					},
 				},
@@ -383,7 +403,7 @@ var _ = ginkgo.Describe("[OverridePolicy] apply overriders testing", func() {
 							Path: "/spec/template/spec/containers/0/image",
 						},
 						Component: "Registry",
-						Operator:  "replace",
+						Operator:  policyv1alpha1.OverriderOpReplace,
 						Value:     "fictional.registry.us",
 					},
 				},
@@ -409,9 +429,224 @@ var _ = ginkgo.Describe("[OverridePolicy] apply overriders testing", func() {
 				})
 		})
 	})
+
+	ginkgo.Context("[FieldOverrider] apply field overrider testing to update JSON values in ConfigMap", func() {
+		var configMapNamespace, configMapName string
+		var configMap *corev1.ConfigMap
+
+		ginkgo.BeforeEach(func() {
+			configMapNamespace = testNamespace
+			configMapName = configMapNamePrefix + rand.String(RandomStrLength)
+			propagationPolicyNamespace = testNamespace
+			propagationPolicyName = configMapName
+			overridePolicyNamespace = testNamespace
+			overridePolicyName = configMapName
+
+			configMapData := map[string]string{
+				"deploy.json": fmt.Sprintf(`{
+				"apiVersion": "apps/v1",
+				"kind": "Deployment",
+				"metadata": {
+					"name": "nginx-deploy",
+					"namespace": "%s"
+				},
+				"spec": {
+					"replicas": 3,
+					"selector": {
+						"matchLabels": {
+							"app": "nginx"
+						}
+					},
+					"template": {
+						"metadata": {
+							"labels": {
+								"app": "nginx"
+							}
+						},
+						"spec": {
+							"containers": [
+								{
+									"name": "nginx",
+									"image": "nginx:1.19.0"
+								}
+							]
+						}
+					}
+				}
+			}`, configMapNamespace),
+			}
+
+			configMap = helper.NewConfigMap(configMapNamespace, configMapName, configMapData)
+			propagationPolicy = helper.NewPropagationPolicy(propagationPolicyNamespace, propagationPolicyName, []policyv1alpha1.ResourceSelector{
+				{
+					APIVersion: configMap.APIVersion,
+					Kind:       configMap.Kind,
+					Name:       configMap.Name,
+				},
+			}, policyv1alpha1.Placement{
+				ClusterAffinity: &policyv1alpha1.ClusterAffinity{
+					ClusterNames: framework.ClusterNames(),
+				},
+			})
+
+			overridePolicy = helper.NewOverridePolicy(overridePolicyNamespace, overridePolicyName, []policyv1alpha1.ResourceSelector{
+				{
+					APIVersion: configMap.APIVersion,
+					Kind:       configMap.Kind,
+					Name:       configMap.Name,
+				},
+			}, policyv1alpha1.ClusterAffinity{
+				ClusterNames: framework.ClusterNames(),
+			}, policyv1alpha1.Overriders{
+				FieldOverrider: []policyv1alpha1.FieldOverrider{
+					{
+						FieldPath: "/data/deploy.json",
+						JSON: []policyv1alpha1.JSONPatchOperation{
+							{
+								SubPath:  "/spec/replicas",
+								Operator: policyv1alpha1.OverriderOpReplace,
+								Value:    apiextensionsv1.JSON{Raw: []byte(`5`)},
+							},
+							{
+								SubPath:  "/spec/template/spec/containers/-",
+								Operator: policyv1alpha1.OverriderOpAdd,
+								Value:    apiextensionsv1.JSON{Raw: []byte(`{"name": "nginx-helper", "image": "nginx:1.19.1"}`)},
+							},
+							{
+								SubPath:  "/spec/template/spec/containers/0/image",
+								Operator: policyv1alpha1.OverriderOpRemove,
+							},
+						},
+					},
+				},
+			})
+		})
+
+		ginkgo.BeforeEach(func() {
+			framework.CreatePropagationPolicy(karmadaClient, propagationPolicy)
+			framework.CreateOverridePolicy(karmadaClient, overridePolicy)
+			framework.CreateConfigMap(kubeClient, configMap)
+			ginkgo.DeferCleanup(func() {
+				framework.RemovePropagationPolicy(karmadaClient, propagationPolicy.Namespace, propagationPolicy.Name)
+				framework.RemoveOverridePolicy(karmadaClient, overridePolicy.Namespace, overridePolicy.Name)
+				framework.RemoveConfigMap(kubeClient, configMap.Namespace, configMap.Name)
+			})
+		})
+
+		ginkgo.It("should override JSON field in ConfigMap", func() {
+			klog.Infof("check if configMap present on member clusters has the correct JSON field value.")
+			framework.WaitConfigMapPresentOnClustersFitWith(framework.ClusterNames(), configMap.Namespace, configMap.Name,
+				func(cm *corev1.ConfigMap) bool {
+					return strings.Contains(cm.Data["deploy.json"], `"replicas":5`) &&
+						strings.Contains(cm.Data["deploy.json"], `"name":"nginx-helper"`) &&
+						!strings.Contains(cm.Data["deploy.json"], `"image":"nginx:1.19.0"`)
+				})
+		})
+	})
+
+	ginkgo.Context("[FieldOverrider] apply field overrider testing to update YAML values in ConfigMap", func() {
+		var configMapNamespace, configMapName string
+		var configMap *corev1.ConfigMap
+
+		ginkgo.BeforeEach(func() {
+			configMapNamespace = testNamespace
+			configMapName = configMapNamePrefix + rand.String(RandomStrLength)
+			propagationPolicyNamespace = testNamespace
+			propagationPolicyName = configMapName
+			overridePolicyNamespace = testNamespace
+			overridePolicyName = configMapName
+
+			// Define the ConfigMap data
+			configMapData := map[string]string{
+				"nginx.yaml": `
+server:
+  listen: 80
+  server_name: localhost
+  location /:
+    root: /usr/share/nginx/html
+    index: 
+      - index.html
+      - index.htm
+  error_page:
+    - code: 500
+    - code: 502
+    - code: 503
+    - code: 504
+  location /50x.html:
+    root: /usr/share/nginx/html
+`,
+			}
+			configMap = helper.NewConfigMap(configMapNamespace, configMapName, configMapData)
+			propagationPolicy = helper.NewPropagationPolicy(propagationPolicyNamespace, propagationPolicyName, []policyv1alpha1.ResourceSelector{
+				{
+					APIVersion: configMap.APIVersion,
+					Kind:       configMap.Kind,
+					Name:       configMap.Name,
+				},
+			}, policyv1alpha1.Placement{
+				ClusterAffinity: &policyv1alpha1.ClusterAffinity{
+					ClusterNames: framework.ClusterNames(),
+				},
+			})
+
+			overridePolicy = helper.NewOverridePolicy(overridePolicyNamespace, overridePolicyName, []policyv1alpha1.ResourceSelector{
+				{
+					APIVersion: configMap.APIVersion,
+					Kind:       configMap.Kind,
+					Name:       configMap.Name,
+				},
+			}, policyv1alpha1.ClusterAffinity{
+				ClusterNames: framework.ClusterNames(),
+			}, policyv1alpha1.Overriders{
+				FieldOverrider: []policyv1alpha1.FieldOverrider{
+					{
+						FieldPath: "/data/nginx.yaml",
+						YAML: []policyv1alpha1.YAMLPatchOperation{
+							{
+								SubPath:  "/server/location ~1/root",
+								Operator: policyv1alpha1.OverriderOpReplace,
+								Value:    apiextensionsv1.JSON{Raw: []byte(`"/var/www/html"`)},
+							},
+							{
+								SubPath:  "/server/error_page/-",
+								Operator: policyv1alpha1.OverriderOpAdd,
+								Value:    apiextensionsv1.JSON{Raw: []byte(`{"code": 400}`)},
+							},
+							{
+								SubPath:  "/server/location ~1/index",
+								Operator: policyv1alpha1.OverriderOpRemove,
+							},
+						},
+					},
+				},
+			})
+		})
+
+		ginkgo.BeforeEach(func() {
+			framework.CreatePropagationPolicy(karmadaClient, propagationPolicy)
+			framework.CreateOverridePolicy(karmadaClient, overridePolicy)
+			framework.CreateConfigMap(kubeClient, configMap)
+			ginkgo.DeferCleanup(func() {
+				framework.RemovePropagationPolicy(karmadaClient, propagationPolicy.Namespace, propagationPolicy.Name)
+				framework.RemoveOverridePolicy(karmadaClient, overridePolicy.Namespace, overridePolicy.Name)
+				framework.RemoveConfigMap(kubeClient, configMap.Namespace, configMap.Name)
+			})
+		})
+
+		ginkgo.It("should override YAML field in ConfigMap", func() {
+			klog.Infof("check if configMap present on member clusters has the correct YAML field value.")
+			framework.WaitConfigMapPresentOnClustersFitWith(framework.ClusterNames(), configMap.Namespace, configMap.Name,
+				func(cm *corev1.ConfigMap) bool {
+					return strings.Contains(cm.Data["nginx.yaml"], "root: /var/www/html") &&
+						strings.Contains(cm.Data["nginx.yaml"], "code: 400") &&
+						!strings.Contains(cm.Data["nginx.yaml"], "- index.html")
+				})
+		})
+	})
+
 })
 
-var _ = framework.SerialDescribe("OverridePolicy with nil resourceSelectors", func() {
+var _ = framework.SerialDescribe("OverridePolicy with nil resourceSelector testing", func() {
 	var deploymentNamespace, deploymentName string
 	var propagationPolicyNamespace, propagationPolicyName string
 	var overridePolicyNamespace, overridePolicyName string
@@ -448,7 +683,7 @@ var _ = framework.SerialDescribe("OverridePolicy with nil resourceSelectors", fu
 						Path: "/spec/template/spec/containers/0/image",
 					},
 					Component: "Registry",
-					Operator:  "replace",
+					Operator:  policyv1alpha1.OverriderOpReplace,
 					Value:     "fictional.registry.us",
 				},
 			},
@@ -522,17 +757,17 @@ var _ = ginkgo.Describe("[OverrideRules] apply overriders testing", func() {
 						ImageOverrider: []policyv1alpha1.ImageOverrider{
 							{
 								Component: "Registry",
-								Operator:  "replace",
+								Operator:  policyv1alpha1.OverriderOpReplace,
 								Value:     "fictional.registry.us",
 							},
 							{
 								Component: "Repository",
-								Operator:  "replace",
+								Operator:  policyv1alpha1.OverriderOpReplace,
 								Value:     "busybox",
 							},
 							{
 								Component: "Tag",
-								Operator:  "replace",
+								Operator:  policyv1alpha1.OverriderOpReplace,
 								Value:     "1.0",
 							},
 						},
@@ -605,17 +840,17 @@ var _ = ginkgo.Describe("[OverrideRules] apply overriders testing", func() {
 						ImageOverrider: []policyv1alpha1.ImageOverrider{
 							{
 								Component: "Registry",
-								Operator:  "replace",
+								Operator:  policyv1alpha1.OverriderOpReplace,
 								Value:     "fictional.registry.us",
 							},
 							{
 								Component: "Repository",
-								Operator:  "replace",
+								Operator:  policyv1alpha1.OverriderOpReplace,
 								Value:     "busybox",
 							},
 							{
 								Component: "Tag",
-								Operator:  "replace",
+								Operator:  policyv1alpha1.OverriderOpReplace,
 								Value:     "1.0",
 							},
 						},
@@ -690,7 +925,7 @@ var _ = ginkgo.Describe("[OverrideRules] apply overriders testing", func() {
 									Path: "/spec/template/spec/containers/0/image",
 								},
 								Component: "Registry",
-								Operator:  "replace",
+								Operator:  policyv1alpha1.OverriderOpReplace,
 								Value:     "fictional.registry.us",
 							},
 						},
@@ -720,7 +955,7 @@ var _ = ginkgo.Describe("[OverrideRules] apply overriders testing", func() {
 	})
 })
 
-var _ = framework.SerialDescribe("OverrideRules with nil resourceSelectors", func() {
+var _ = framework.SerialDescribe("OverrideRules with nil resourceSelector testing", func() {
 	var deploymentNamespace, deploymentName string
 	var propagationPolicyNamespace, propagationPolicyName string
 	var overridePolicyNamespace, overridePolicyName string
@@ -761,7 +996,7 @@ var _ = framework.SerialDescribe("OverrideRules with nil resourceSelectors", fun
 								Path: "/spec/template/spec/containers/0/image",
 							},
 							Component: "Registry",
-							Operator:  "replace",
+							Operator:  policyv1alpha1.OverriderOpReplace,
 							Value:     "fictional.registry.us",
 						},
 					},
@@ -804,7 +1039,7 @@ var _ = framework.SerialDescribe("OverrideRules with nil resourceSelectors", fun
 		ginkgo.It("deployment imageOverride testing", func() {
 			ginkgo.By("Check if deployment have presented on member clusters", func() {
 				framework.WaitDeploymentPresentOnClustersFitWith(framework.ClusterNames(), deployment.Namespace, deployment.Name,
-					func(deployment *appsv1.Deployment) bool {
+					func(*appsv1.Deployment) bool {
 						return true
 					})
 			})

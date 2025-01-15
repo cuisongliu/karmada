@@ -1,6 +1,23 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package store
 
 import (
+	"fmt"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -61,8 +78,14 @@ func (c *clusterCache) updateCache(resources map[schema.GroupVersionResource]*Mu
 				multiNS.Add(metav1.NamespaceAll)
 			}
 
+			singularName, err := c.restMapper.ResourceSingularizer(resource.Resource)
+			if err != nil {
+				klog.Warningf("Failed to get singular name for resource: %s", resource.String())
+				return err
+			}
+
 			klog.Infof("Add cache for %s %s", c.clusterName, resource.String())
-			cache, err := newResourceCache(c.clusterName, resource, kind, namespaced, multiNS, c.clientForResourceFunc(resource))
+			cache, err := newResourceCache(c.clusterName, resource, kind, singularName, namespaced, multiNS, c.clientForResourceFunc(resource))
 			if err != nil {
 				return err
 			}
@@ -95,4 +118,23 @@ func (c *clusterCache) cacheForResource(gvr schema.GroupVersionResource) *resour
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	return c.cache[gvr]
+}
+
+// readinessCheck checks if the storage is ready for accepting requests.
+func (c *clusterCache) readinessCheck() error {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	var failedChecks []string
+	for gvr, rc := range c.cache {
+		if rc.ReadinessCheck() != nil {
+			failedChecks = append(failedChecks, gvr.String())
+		}
+	}
+	if len(failedChecks) == 0 {
+		klog.Infof("ClusterCache(%s) is ready for all registered resources", c.clusterName)
+		return nil
+	}
+	klog.V(4).Infof("ClusterCache(%s) is not ready for: %v", c.clusterName, failedChecks)
+	return fmt.Errorf("ClusterCache(%s) is not ready for: %v", c.clusterName, failedChecks)
 }

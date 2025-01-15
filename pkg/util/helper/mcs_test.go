@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package helper
 
 import (
@@ -8,7 +24,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -40,12 +56,11 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 						Addresses: []string{"1.1.1.1"},
 					}},
 					Ports: []discoveryv1.EndpointPort{{
-						Port: pointer.Int32(80),
+						Port: ptr.To[int32](80),
 					}},
 				},
 			},
 			want: &discoveryv1.EndpointSlice{
-				TypeMeta: metav1.TypeMeta{APIVersion: "discovery.k8s.io/v1", Kind: "EndpointSlice"},
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "eps", Namespace: "ns",
 					Labels: map[string]string{"foo": "foo1"},
@@ -56,7 +71,7 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 					Conditions: discoveryv1.EndpointConditions{},
 				}},
 				Ports: []discoveryv1.EndpointPort{{
-					Port: pointer.Int32(80),
+					Port: ptr.To[int32](80),
 				}},
 			},
 			wantErr: false,
@@ -76,12 +91,11 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 						Addresses: []string{"1.1.1.1"},
 					}},
 					Ports: []discoveryv1.EndpointPort{{
-						Port: pointer.Int32(80),
+						Port: ptr.To[int32](80),
 					}},
 				},
 			},
 			want: &discoveryv1.EndpointSlice{
-				TypeMeta: metav1.TypeMeta{APIVersion: "discovery.k8s.io/v1", Kind: "EndpointSlice"},
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "eps", Namespace: "ns",
 					Labels: map[string]string{"foo": "foo1"},
@@ -92,7 +106,7 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 					Conditions: discoveryv1.EndpointConditions{},
 				}},
 				Ports: []discoveryv1.EndpointPort{{
-					Port: pointer.Int32(80),
+					Port: ptr.To[int32](80),
 				}},
 			},
 			wantErr: false,
@@ -111,7 +125,7 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 							Addresses: []string{"1.1.1.1"},
 						}},
 						Ports: []discoveryv1.EndpointPort{{
-							Port: pointer.Int32(80),
+							Port: ptr.To[int32](80),
 						}},
 					}).Build(),
 				endpointSlice: &discoveryv1.EndpointSlice{
@@ -124,12 +138,11 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 						Addresses: []string{"1.1.1.1"},
 					}},
 					Ports: []discoveryv1.EndpointPort{{
-						Port: pointer.Int32(80),
+						Port: ptr.To[int32](80),
 					}},
 				},
 			},
 			want: &discoveryv1.EndpointSlice{
-				TypeMeta: metav1.TypeMeta{APIVersion: "discovery.k8s.io/v1", Kind: "EndpointSlice"},
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "eps", Namespace: "ns",
 					Labels: map[string]string{"foo": "foo1"},
@@ -140,7 +153,7 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 					Conditions: discoveryv1.EndpointConditions{},
 				}},
 				Ports: []discoveryv1.EndpointPort{{
-					Port: pointer.Int32(80),
+					Port: ptr.To[int32](80),
 				}},
 			},
 			wantErr: false,
@@ -148,7 +161,7 @@ func TestCreateOrUpdateEndpointSlice(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := CreateOrUpdateEndpointSlice(tt.args.client, tt.args.endpointSlice); (err != nil) != tt.wantErr {
+			if err := CreateOrUpdateEndpointSlice(context.Background(), tt.args.client, tt.args.endpointSlice); (err != nil) != tt.wantErr {
 				t.Errorf("CreateOrUpdateEndpointSlice() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
@@ -193,7 +206,7 @@ func TestDeleteEndpointSlice(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := DeleteEndpointSlice(tt.args.c, tt.args.selector); (err != nil) != tt.wantErr {
+			if err := DeleteEndpointSlice(context.Background(), tt.args.c, tt.args.selector); (err != nil) != tt.wantErr {
 				t.Errorf("DeleteEndpointSlice() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			list := &discoveryv1.EndpointSliceList{}

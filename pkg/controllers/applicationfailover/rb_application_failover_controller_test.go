@@ -1,3 +1,19 @@
+/*
+Copyright 2023 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package applicationfailover
 
 import (
@@ -179,7 +195,7 @@ func TestRBApplicationFailoverController_syncBinding(t *testing.T) {
 		},
 	}
 
-	dur, err := c.syncBinding(binding)
+	dur, err := c.syncBinding(context.Background(), binding)
 	assert.Equal(t, 5*time.Second, dur)
 	assert.NoError(t, err)
 }
@@ -261,7 +277,7 @@ func TestRBApplicationFailoverController_updateBinding(t *testing.T) {
 	c := generateRBApplicationFailoverController()
 
 	t.Run("failed when c.Update", func(t *testing.T) {
-		err := c.updateBinding(binding, allClusters, needEvictClusters)
+		err := c.updateBinding(context.Background(), binding, allClusters, needEvictClusters)
 		assert.Error(t, err)
 	})
 
@@ -269,7 +285,7 @@ func TestRBApplicationFailoverController_updateBinding(t *testing.T) {
 		if err := c.Client.Create(context.Background(), binding); err != nil {
 			t.Fatalf("Failed to create binding: %v", err)
 		}
-		err := c.updateBinding(binding, allClusters, needEvictClusters)
+		err := c.updateBinding(context.Background(), binding, allClusters, needEvictClusters)
 		assert.NoError(t, err)
 	})
 }

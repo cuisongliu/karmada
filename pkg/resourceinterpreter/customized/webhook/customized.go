@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package webhook
 
 import (
@@ -15,7 +31,6 @@ import (
 	webhookutil "k8s.io/apiserver/pkg/util/webhook"
 	corev1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
-	"k8s.io/kube-aggregator/pkg/apiserver"
 	utiltrace "k8s.io/utils/trace"
 
 	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
@@ -37,8 +52,13 @@ type CustomizedInterpreter struct {
 // NewCustomizedInterpreter return a new CustomizedInterpreter.
 func NewCustomizedInterpreter(informer genericmanager.SingleClusterInformerManager, serviceLister corev1.ServiceLister) (*CustomizedInterpreter, error) {
 	cm, err := webhookutil.NewClientManager(
-		[]schema.GroupVersion{configv1alpha1.SchemeGroupVersion},
-		configv1alpha1.AddToScheme,
+		[]schema.GroupVersion{
+			{
+				Group:   configv1alpha1.GroupVersion.Group,
+				Version: configv1alpha1.GroupVersion.Version,
+			},
+		},
+		configv1alpha1.Install,
 	)
 	if err != nil {
 		return nil, err
@@ -49,7 +69,7 @@ func NewCustomizedInterpreter(informer genericmanager.SingleClusterInformerManag
 	}
 
 	cm.SetAuthenticationInfoResolver(authInfoResolver)
-	cm.SetServiceResolver(apiserver.NewClusterIPServiceResolver(serviceLister))
+	cm.SetServiceResolver(NewServiceResolver(serviceLister))
 
 	return &CustomizedInterpreter{
 		hookManager:   configmanager.NewExploreConfigManager(informer),
@@ -242,7 +262,7 @@ func (e *CustomizedInterpreter) callHook(ctx context.Context, hook configmanager
 	if err != nil {
 		return nil, &webhookutil.ErrCallingWebhook{
 			WebhookName: hook.GetUID(),
-			Reason:      fmt.Errorf("reveived invalid webhook response: %w", err),
+			Reason:      fmt.Errorf("received invalid webhook response: %w", err),
 		}
 	}
 

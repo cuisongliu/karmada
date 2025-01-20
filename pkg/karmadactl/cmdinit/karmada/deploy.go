@@ -1,7 +1,24 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package karmada
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -28,16 +45,16 @@ import (
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/bootstraptoken/clusterinfo"
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/options"
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/utils"
-	"github.com/karmada-io/karmada/pkg/karmadactl/util"
+	cmdutil "github.com/karmada-io/karmada/pkg/karmadactl/util"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util/apiclient"
-	tokenutil "github.com/karmada-io/karmada/pkg/karmadactl/util/bootstraptoken"
+	"github.com/karmada-io/karmada/pkg/util/names"
 )
 
 const (
 	clusterProxyAdminRole = "cluster-proxy-admin"
 	clusterProxyAdminUser = "system:admin"
 
-	aggregatedApiserverServiceName = "karmada-aggregated-apiserver"
+	aggregatedApiserverServiceName = names.KarmadaAggregatedAPIServerComponentName
 )
 
 // InitKarmadaResources Initialize karmada resource
@@ -53,7 +70,7 @@ func InitKarmadaResources(dir, caBase64, systemNamespace string) error {
 	}
 
 	// create namespace
-	if err := util.CreateOrUpdateNamespace(clientSet, util.NewNamespace(systemNamespace)); err != nil {
+	if err := cmdutil.CreateOrUpdateNamespace(clientSet, cmdutil.NewNamespace(systemNamespace)); err != nil {
 		klog.Exitln(err)
 	}
 
@@ -100,50 +117,28 @@ func InitKarmadaResources(dir, caBase64, systemNamespace string) error {
 
 	// karmada-aggregated-apiserver
 	klog.Info("Create Service 'karmada-aggregated-apiserver' and APIService 'v1alpha1.cluster.karmada.io'.")
-	if err = initAggregatedAPIService(clientSet, restConfig, systemNamespace); err != nil {
+	if err = initAggregatedAPIService(clientSet, restConfig, systemNamespace, caBase64); err != nil {
 		klog.Exitln(err)
 	}
 
-	if err = createExtralResources(clientSet, dir); err != nil {
+	if err = createExtraResources(clientSet, dir); err != nil {
 		klog.Exitln(err)
 	}
 
 	return nil
 }
 
-// InitKarmadaBootstrapToken create initial bootstrap token
-func InitKarmadaBootstrapToken(dir string) (string, error) {
-	restConfig, err := apiclient.RestConfig("", filepath.Join(dir, options.KarmadaKubeConfigName))
-	if err != nil {
-		return "", err
+func createExtraResources(clientSet *kubernetes.Clientset, dir string) error {
+	// grant view clusterrole with karmada resource permission
+	if err := grantKarmadaPermissionToViewClusterRole(clientSet); err != nil {
+		return err
 	}
 
-	clientSet, err := apiclient.NewClientSet(restConfig)
-	if err != nil {
-		return "", err
-	}
-	// Create initial bootstrap token
-	klog.Info("Initialize karmada bootstrap token")
-	bootstrapToken, err := tokenutil.GenerateRandomBootstrapToken(&metav1.Duration{Duration: tokenutil.DefaultTokenDuration}, "", tokenutil.DefaultGroups, tokenutil.DefaultUsages)
-	if err != nil {
-		return "", err
+	// grant edit clusterrole with karmada resource permission
+	if err := grantKarmadaPermissionToEditClusterRole(clientSet); err != nil {
+		return err
 	}
 
-	if err := tokenutil.CreateNewToken(clientSet, bootstrapToken); err != nil {
-		return "", err
-	}
-
-	tokenStr := bootstrapToken.Token.ID + "." + bootstrapToken.Token.Secret
-
-	registerCommand, err := tokenutil.GenerateRegisterCommand(filepath.Join(dir, options.KarmadaKubeConfigName), "", tokenStr, "")
-	if err != nil {
-		return "", fmt.Errorf("failed to get register command, err: %w", err)
-	}
-
-	return registerCommand, nil
-}
-
-func createExtralResources(clientSet *kubernetes.Clientset, dir string) error {
 	// grant proxy permission to "system:admin".
 	if err := grantProxyPermissionToAdmin(clientSet); err != nil {
 		return err
@@ -158,8 +153,8 @@ func createExtralResources(clientSet *kubernetes.Clientset, dir string) error {
 		return fmt.Errorf("error creating clusterinfo RBAC rules: %v", err)
 	}
 
-	// grant limited access permission to 'karmada-agent'
-	if err := grantAccessPermissionToAgent(clientSet); err != nil {
+	// grant access permission to 'karmada-agent-rbac-generator'
+	if err := grantAccessPermissionToAgentRBACGenerator(clientSet); err != nil {
 		return err
 	}
 
@@ -194,7 +189,7 @@ func crdPatchesResources(filename, caBundle string) ([]byte, error) {
 }
 
 // createCRDs create crd resource
-func createCRDs(crdClient *clientset.Clientset, filename string) error {
+func createCRDs(crdClient clientset.Interface, filename string) error {
 	obj := apiextensionsv1.CustomResourceDefinition{}
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -225,7 +220,7 @@ func createCRDs(crdClient *clientset.Clientset, filename string) error {
 }
 
 // patchCRDs patch crd resource
-func patchCRDs(crdClient *clientset.Clientset, caBundle, filename string) error {
+func patchCRDs(crdClient clientset.Interface, caBundle, filename string) error {
 	data, err := crdPatchesResources(filename, caBundle)
 	if err != nil {
 		return err
@@ -250,8 +245,12 @@ func getName(str, start, end string) string {
 	return str
 }
 
-func initAggregatedAPIService(clientSet *kubernetes.Clientset, restConfig *rest.Config, systemNamespace string) error {
+func initAggregatedAPIService(clientSet *kubernetes.Clientset, restConfig *rest.Config, systemNamespace, caBase64 string) error {
 	// https://github.com/karmada-io/karmada/blob/master/artifacts/deploy/karmada-aggregated-apiserver-apiservice.yaml
+	caBytes, err := base64.StdEncoding.DecodeString(caBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode caBase64: %+v", err)
+	}
 	aaService := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -266,7 +265,7 @@ func initAggregatedAPIService(clientSet *kubernetes.Clientset, restConfig *rest.
 			ExternalName: fmt.Sprintf("%s.%s.svc", aggregatedApiserverServiceName, systemNamespace),
 		},
 	}
-	if err := util.CreateOrUpdateService(clientSet, aaService); err != nil {
+	if err := cmdutil.CreateOrUpdateService(clientSet, aaService); err != nil {
 		return err
 	}
 
@@ -284,12 +283,12 @@ func initAggregatedAPIService(clientSet *kubernetes.Clientset, restConfig *rest.
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   aaAPIServiceObjName,
-			Labels: map[string]string{"app": "karmada-aggregated-apiserver", "apiserver": "true"},
+			Labels: map[string]string{"app": names.KarmadaAggregatedAPIServerComponentName, "apiserver": "true"},
 		},
 		Spec: apiregistrationv1.APIServiceSpec{
-			InsecureSkipTLSVerify: true,
-			Group:                 clusterv1alpha1.GroupName,
-			GroupPriorityMinimum:  2000,
+			CABundle:             caBytes,
+			Group:                clusterv1alpha1.GroupName,
+			GroupPriorityMinimum: 2000,
 			Service: &apiregistrationv1.ServiceReference{
 				Name:      aaService.Name,
 				Namespace: aaService.Namespace,
@@ -299,7 +298,7 @@ func initAggregatedAPIService(clientSet *kubernetes.Clientset, restConfig *rest.
 		},
 	}
 
-	if err = util.CreateOrUpdateAPIService(apiRegistrationClient, aaAPIService); err != nil {
+	if err = cmdutil.CreateOrUpdateAPIService(apiRegistrationClient, aaAPIService); err != nil {
 		return err
 	}
 

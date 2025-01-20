@@ -1,12 +1,31 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package validation
 
 import (
+	"archive/tar"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/util"
@@ -117,7 +136,7 @@ func TestValidateOverrideSpec(t *testing.T) {
 						Overriders: policyv1alpha1.Overriders{
 							AnnotationsOverrider: []policyv1alpha1.LabelAnnotationOverrider{
 								{
-									Operator: "add",
+									Operator: policyv1alpha1.OverriderOpAdd,
 									Value:    map[string]string{"testannotation~projectId": "c-m-lfx9lk92p-v86cf"},
 								},
 							},
@@ -138,7 +157,7 @@ func TestValidateOverrideSpec(t *testing.T) {
 						Overriders: policyv1alpha1.Overriders{
 							LabelsOverrider: []policyv1alpha1.LabelAnnotationOverrider{
 								{
-									Operator: "add",
+									Operator: policyv1alpha1.OverriderOpAdd,
 									Value:    map[string]string{"testannotation~projectId": "c-m-lfx9lk92p-v86cf"},
 								},
 							},
@@ -261,14 +280,14 @@ func TestEmptyOverrides(t *testing.T) {
 				ImageOverrider: []policyv1alpha1.ImageOverrider{
 					{
 						Component: "Registry",
-						Operator:  "remove",
+						Operator:  policyv1alpha1.OverriderOpRemove,
 						Value:     "fictional.registry.us",
 					},
 				},
 				CommandOverrider: []policyv1alpha1.CommandArgsOverrider{
 					{
 						ContainerName: "nginx",
-						Operator:      "add",
+						Operator:      policyv1alpha1.OverriderOpAdd,
 						Value:         []string{"echo 'hello karmada'"},
 					},
 				},
@@ -354,7 +373,7 @@ func TestValidatePropagationSpec(t *testing.T) {
 			expectedErr: "unsupported operator \"Exists\", must be In or NotIn",
 		},
 		{
-			name: "clusterAffinities can not co-exist with clusterAffinity",
+			name: "clusterAffinities cannot co-exist with clusterAffinity",
 			spec: policyv1alpha1.PropagationSpec{
 				Placement: policyv1alpha1.Placement{
 					ClusterAffinity: &policyv1alpha1.ClusterAffinity{
@@ -366,7 +385,7 @@ func TestValidatePropagationSpec(t *testing.T) {
 							ClusterAffinity: policyv1alpha1.ClusterAffinity{
 								ClusterNames: []string{"m1"},
 							}}}}},
-			expectedErr: "clusterAffinities can not co-exist with clusterAffinity",
+			expectedErr: "clusterAffinities cannot co-exist with clusterAffinity",
 		},
 		{
 			name: "clusterAffinities different affinities have the same affinityName",
@@ -536,6 +555,76 @@ func TestValidatePropagationSpec(t *testing.T) {
 				}},
 			expectedErr: "the cluster spread constraint must be enabled in one of the constraints in case of SpreadByField is enabled",
 		},
+		{
+			name: "resourceSelector name is empty when preemption is enabled",
+			spec: policyv1alpha1.PropagationSpec{
+				ResourceSelectors: []policyv1alpha1.ResourceSelector{
+					{
+						APIVersion: "v1",
+						Kind:       "Pod",
+						Namespace:  "default",
+					},
+				},
+				Preemption: policyv1alpha1.PreemptAlways,
+			},
+			expectedErr: "name cannot be empty if preemption is Always, the empty name may cause unexpected resources preemption",
+		},
+		{
+			name: "suspension dispatching cannot co-exist with dispatchingOnClusters",
+			spec: policyv1alpha1.PropagationSpec{
+				Suspension: &policyv1alpha1.Suspension{
+					Dispatching: ptr.To(true),
+					DispatchingOnClusters: &policyv1alpha1.SuspendClusters{
+						ClusterNames: []string{"cluster-name"},
+					},
+				},
+			},
+			expectedErr: "suspension dispatching cannot co-exist with dispatchingOnClusters.clusterNames",
+		},
+		{
+			name: "suspension dispatching with nil dispatchingOnClusters is valid",
+			spec: policyv1alpha1.PropagationSpec{
+				Suspension: &policyv1alpha1.Suspension{
+					Dispatching: ptr.To(true),
+				},
+			},
+			expectedErr: "",
+		},
+		{
+			name: "suspension dispatching with empty dispatching clusters is valid",
+			spec: policyv1alpha1.PropagationSpec{
+				Suspension: &policyv1alpha1.Suspension{
+					Dispatching: ptr.To(true),
+					DispatchingOnClusters: &policyv1alpha1.SuspendClusters{
+						ClusterNames: []string{},
+					},
+				},
+			},
+			expectedErr: "",
+		},
+		{
+			name: "dispatchingOnClusters.clusterNames without dispatching is valid",
+			spec: policyv1alpha1.PropagationSpec{
+				Suspension: &policyv1alpha1.Suspension{
+					DispatchingOnClusters: &policyv1alpha1.SuspendClusters{
+						ClusterNames: []string{"cluster-name"},
+					},
+				},
+			},
+			expectedErr: "",
+		},
+		{
+			name: "dispatchingOnClusters.clusterNames with dispatching false is valid",
+			spec: policyv1alpha1.PropagationSpec{
+				Suspension: &policyv1alpha1.Suspension{
+					Dispatching: ptr.To(false),
+					DispatchingOnClusters: &policyv1alpha1.SuspendClusters{
+						ClusterNames: []string{"cluster-name"},
+					},
+				},
+			},
+			expectedErr: "",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -572,7 +661,7 @@ func TestValidateApplicationFailover(t *testing.T) {
 			name: "the tolerationSeconds is less than zero",
 			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
 				DecisionConditions: policyv1alpha1.DecisionConditions{
-					TolerationSeconds: pointer.Int32(-100),
+					TolerationSeconds: ptr.To[int32](-100),
 				},
 			},
 			expectedErr: "spec.failover.application.decisionConditions.tolerationSeconds: Invalid value: -100: must be greater than or equal to 0",
@@ -581,10 +670,10 @@ func TestValidateApplicationFailover(t *testing.T) {
 			name: "the gracePeriodSeconds is declared when purgeMode is not graciously",
 			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
 				DecisionConditions: policyv1alpha1.DecisionConditions{
-					TolerationSeconds: pointer.Int32(100),
+					TolerationSeconds: ptr.To[int32](100),
 				},
 				PurgeMode:          policyv1alpha1.Immediately,
-				GracePeriodSeconds: pointer.Int32(100),
+				GracePeriodSeconds: ptr.To[int32](100),
 			},
 			expectedErr: "spec.failover.application.gracePeriodSeconds: Invalid value: 100: only takes effect when purgeMode is graciously",
 		},
@@ -592,10 +681,10 @@ func TestValidateApplicationFailover(t *testing.T) {
 			name: "the gracePeriodSeconds is less than 0 when purgeMode is graciously",
 			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
 				DecisionConditions: policyv1alpha1.DecisionConditions{
-					TolerationSeconds: pointer.Int32(100),
+					TolerationSeconds: ptr.To[int32](100),
 				},
 				PurgeMode:          policyv1alpha1.Graciously,
-				GracePeriodSeconds: pointer.Int32(-100),
+				GracePeriodSeconds: ptr.To[int32](-100),
 			},
 			expectedErr: "spec.failover.application.gracePeriodSeconds: Invalid value: -100: must be greater than 0",
 		},
@@ -603,7 +692,7 @@ func TestValidateApplicationFailover(t *testing.T) {
 			name: "the gracePeriodSeconds is empty when purgeMode is graciously",
 			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
 				DecisionConditions: policyv1alpha1.DecisionConditions{
-					TolerationSeconds: pointer.Int32(100),
+					TolerationSeconds: ptr.To[int32](100),
 				},
 				PurgeMode: policyv1alpha1.Graciously,
 			},
@@ -613,7 +702,7 @@ func TestValidateApplicationFailover(t *testing.T) {
 			name: "application behavior is correctly declared",
 			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
 				DecisionConditions: policyv1alpha1.DecisionConditions{
-					TolerationSeconds: pointer.Int32(100),
+					TolerationSeconds: ptr.To[int32](100),
 				},
 			},
 			expectedErr: "",
@@ -629,5 +718,97 @@ func TestValidateApplicationFailover(t *testing.T) {
 				t.Errorf("expected error:\n  %s, but got no error\n", tt.expectedErr)
 			}
 		})
+	}
+}
+
+func TestValidateCrdsTarBall(t *testing.T) {
+	testItems := []struct {
+		name        string
+		header      *tar.Header
+		expectedErr error
+	}{
+		{
+			name: "unclean file dir 'crds/../'",
+			header: &tar.Header{
+				Name:     "crds/../",
+				Typeflag: tar.TypeDir,
+			},
+			expectedErr: fmt.Errorf("the given file contains unclean file dir: %s", "crds/../"),
+		},
+		{
+			name: "unclean file dir 'crds/..'",
+			header: &tar.Header{
+				Name:     "crds/..",
+				Typeflag: tar.TypeDir,
+			},
+			expectedErr: fmt.Errorf("the given file contains unclean file dir: %s", "crds/.."),
+		},
+		{
+			name: "unexpected file dir '../crds'",
+			header: &tar.Header{
+				Name:     "../crds",
+				Typeflag: tar.TypeDir,
+			},
+			expectedErr: fmt.Errorf("the given file contains unexpected file dir: %s", "../crds"),
+		},
+		{
+			name: "unexpected file dir '..'",
+			header: &tar.Header{
+				Name:     "..",
+				Typeflag: tar.TypeDir,
+			},
+			expectedErr: fmt.Errorf("the given file contains unexpected file dir: %s", ".."),
+		},
+		{
+			name: "expected file dir 'crds/'",
+			header: &tar.Header{
+				Name:     "crds/",
+				Typeflag: tar.TypeDir,
+			},
+			expectedErr: nil,
+		},
+		{
+			name: "expected file dir 'crds'",
+			header: &tar.Header{
+				Name:     "crds",
+				Typeflag: tar.TypeDir,
+			},
+			expectedErr: nil,
+		},
+		{
+			name: "unclean file path 'crds/../a.yaml'",
+			header: &tar.Header{
+				Name:     "crds/../a.yaml",
+				Typeflag: tar.TypeReg,
+			},
+			expectedErr: fmt.Errorf("the given file contains unclean file path: %s", "crds/../a.yaml"),
+		},
+		{
+			name: "unexpected file path '../crds/a.yaml'",
+			header: &tar.Header{
+				Name:     "../crds/a.yaml",
+				Typeflag: tar.TypeReg,
+			},
+			expectedErr: fmt.Errorf("the given file contains unexpected file path: %s", "../crds/a.yaml"),
+		},
+		{
+			name: "unexpected file path '../a.yaml'",
+			header: &tar.Header{
+				Name:     "../a.yaml",
+				Typeflag: tar.TypeReg,
+			},
+			expectedErr: fmt.Errorf("the given file contains unexpected file path: %s", "../a.yaml"),
+		},
+		{
+			name: "expected file path 'crds/a.yaml'",
+			header: &tar.Header{
+				Name:     "crds/a.yaml",
+				Typeflag: tar.TypeReg,
+			},
+			expectedErr: nil,
+		},
+	}
+	for _, item := range testItems {
+		assert.Equal(t, item.expectedErr, ValidateCrdsTarBall(item.header))
 	}
 }

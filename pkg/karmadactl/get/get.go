@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package get
 
 import (
@@ -17,33 +33,43 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	metav1beta1 "k8s.io/apimachinery/pkg/apis/meta/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/rest"
 	watchtools "k8s.io/client-go/tools/watch"
+	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/cmd/get"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/interrupt"
 	"k8s.io/kubectl/pkg/util/templates"
-	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
-	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util"
+	karmadautil "github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 	"github.com/karmada-io/karmada/pkg/util/helper"
-	"github.com/karmada-io/karmada/pkg/util/names"
 )
 
 const (
 	printColumnClusterNum = 1
 	proxyURL              = "/apis/cluster.karmada.io/v1alpha1/clusters/%s/proxy/"
+)
+
+type adoption string
+
+const (
+	// managedByKarmada indicates that these are resources of member clusters and are managed by the Karmada control plane.
+	managedByKarmada adoption = "Y"
+	// notManagedByKaramda indicates that these are resources of member clusters and are not managed by the Karmada control plane.
+	notManagedByKaramda adoption = "N"
+	// notApplicable indicates that these are Karmada control plane resources.
+	notApplicable adoption = "-"
 )
 
 var (
@@ -54,7 +80,7 @@ var (
 	eventColumn = metav1.TableColumnDefinition{Name: "EVENT", Type: "string", Format: "", Priority: 0}
 
 	getLong = templates.LongDesc(`
-		Display one or many resources in member clusters.
+		Display one or many resources in Karmada control plane and member clusters.
 
 		Prints a table of the most important information about the specified resources.
 		You can filter the list using a label selector and the --selector flag. If the
@@ -65,49 +91,52 @@ var (
 		of the --template flag, you can filter the attributes of the fetched resources.`)
 
 	getExample = templates.Examples(`
-		# List all pods in ps output format
+		# List all pods in Karmada control plane in ps output format
 		%[1]s get pods
 
-		# List all pods in ps output format with more information (such as node name)
+		# List all pods in Karmada control plane in ps output format with more information (such as node name)
 		%[1]s get pods -o wide
 
 		# List all pods of member1 cluster in ps output format
-		%[1]s get pods -C member1
+		%[1]s get pods --operation-scope=members --clusters=member1
 
-		# List a single replicasets controller with specified NAME in ps output format
+		# List all pods of Karmada control plane and member1 cluster in ps output format
+		%[1]s get pods --operation-scope=all --clusters=member1
+
+		# List a single replicasets controller with specified NAME in Karmada control plane in ps output format
 		%[1]s get replicasets nginx
 
-		# List deployments in JSON output format, in the "v1" version of the "apps" API group
+		# List deployments in Karmada control plane in JSON output format, in the "v1" version of the "apps" API group
 		%[1]s get deployments.v1.apps -o json
 
 		# Return only the phase value of the specified resource
-		%[1]s get -o template deployment/nginx -C member1 --template={{.spec.replicas}}
+		%[1]s get -o template deployment/nginx --template={{.spec.replicas}}
 
-		# List all replication controllers and services together in ps output format
+		# List all replication controllers and services together in Karmada control plane in ps output format
 		%[1]s get rs,services
 
-		# List one or more resources by their type and names
+		# List one or more resources in Karmada control plane by their type and names
 		%[1]s get rs/nginx-cb87b6d88 service/kubernetes`)
 )
 
 // NewCmdGet New get command
-func NewCmdGet(f util.Factory, parentCommand string, streams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdGet(f util.Factory, parentCommand string, streams genericiooptions.IOStreams) *cobra.Command {
 	o := NewCommandGetOptions(streams)
 	cmd := &cobra.Command{
 		Use:                   "get [NAME | -l label | -n namespace]",
-		Short:                 "Display one or many resources",
+		Short:                 "Display one or many resources in Karmada control plane and member clusters.",
 		Long:                  getLong,
 		SilenceUsage:          true,
 		DisableFlagsInUseLine: true,
 		Example:               fmt.Sprintf(getExample, parentCommand),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := o.Complete(f); err != nil {
+			if err := o.Complete(f, cmd); err != nil {
 				return err
 			}
 			if err := o.Validate(cmd); err != nil {
 				return err
 			}
-			if err := o.Run(f, cmd, args); err != nil {
+			if err := o.Run(f, args); err != nil {
 				return err
 			}
 			return nil
@@ -120,9 +149,11 @@ func NewCmdGet(f util.Factory, parentCommand string, streams genericclioptions.I
 	o.PrintFlags.AddFlags(cmd)
 	flags := cmd.Flags()
 	options.AddKubeConfigFlags(flags)
-	flags.StringVarP(options.DefaultConfigFlags.Namespace, "namespace", "n", *options.DefaultConfigFlags.Namespace, "If present, the namespace scope for this CLI request")
+	options.AddNamespaceFlag(flags)
+	o.OperationScope = options.KarmadaControlPlane
+	flags.VarP(&o.OperationScope, "operation-scope", "s", "Used to control the operation scope of the command. The optional values are karmada, members, and all. Defaults to karmada.")
 	flags.StringVarP(&o.LabelSelector, "labels", "l", "", "-l=label or -l label")
-	flags.StringSliceVarP(&o.Clusters, "clusters", "C", []string{}, "-C=member1,member2")
+	flags.StringSliceVarP(&o.Clusters, "clusters", "C", []string{}, "Used to specify target member clusters and only takes effect when the command's operation scope is members or all, for example: --operation-scope=all --clusters=member1,member2")
 	flags.BoolVarP(&o.AllNamespaces, "all-namespaces", "A", o.AllNamespaces, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
 	flags.BoolVar(&o.IgnoreNotFound, "ignore-not-found", o.IgnoreNotFound, "If the requested object does not exist the command will return exit code 0.")
 	flags.BoolVarP(&o.Watch, "watch", "w", o.Watch, "After listing/getting the requested object, watch for changes. Uninitialized objects are excluded if no object name is provided.")
@@ -134,7 +165,9 @@ func NewCmdGet(f util.Factory, parentCommand string, streams genericclioptions.I
 
 // CommandGetOptions contains the input to the get command.
 type CommandGetOptions struct {
-	Clusters []string
+	Clusters             []string
+	OperationScope       options.OperationScope
+	TargetMemberClusters []string
 
 	PrintFlags             *get.PrintFlags
 	ToPrinter              func(*meta.RESTMapping, *bool, bool, bool) (printers.ResourcePrinterFunc, error)
@@ -163,13 +196,13 @@ type CommandGetOptions struct {
 	IgnoreNotFound bool
 	Export         bool
 
-	genericclioptions.IOStreams
+	genericiooptions.IOStreams
 
-	karmadaClient karmadaclientset.Interface
+	KarmadaClient karmadaclientset.Interface
 }
 
 // NewCommandGetOptions returns a CommandGetOptions with default chunk size 500.
-func NewCommandGetOptions(streams genericclioptions.IOStreams) *CommandGetOptions {
+func NewCommandGetOptions(streams genericiooptions.IOStreams) *CommandGetOptions {
 	return &CommandGetOptions{
 		PrintFlags:  get.NewGetPrintFlags(),
 		IOStreams:   streams,
@@ -179,17 +212,20 @@ func NewCommandGetOptions(streams genericclioptions.IOStreams) *CommandGetOption
 }
 
 // Complete takes the command arguments and infers any remaining options.
-func (g *CommandGetOptions) Complete(f util.Factory) error {
-	newScheme := gclient.NewSchema()
-	namespace, _, err := f.ToRawKubeConfigLoader().Namespace()
+func (g *CommandGetOptions) Complete(f util.Factory, cmd *cobra.Command) error {
+	err := g.handleNamespaceScopeFlags(f)
 	if err != nil {
 		return err
 	}
-	g.Namespace = namespace
 
 	templateArg := ""
 	if g.PrintFlags.TemplateFlags != nil && g.PrintFlags.TemplateFlags.TemplateArgument != nil {
 		templateArg = *g.PrintFlags.TemplateFlags.TemplateArgument
+	}
+
+	outputOption := cmd.Flags().Lookup("output").Value.String()
+	if strings.Contains(outputOption, "custom-columns") || outputOption == "yaml" || strings.Contains(outputOption, "json") {
+		g.ServerPrint = false
 	}
 
 	// human readable printers have special conversion rules, so we determine if we're using one.
@@ -197,7 +233,44 @@ func (g *CommandGetOptions) Complete(f util.Factory) error {
 		g.IsHumanReadablePrinter = true
 	}
 
-	g.ToPrinter = func(mapping *meta.RESTMapping, outputObjects *bool, withNamespace bool, withKind bool) (printers.ResourcePrinterFunc, error) {
+	g.ToPrinter = g.getResourcePrinter()
+	karmadaClient, err := f.KarmadaClientSet()
+	if err != nil {
+		return err
+	}
+	g.KarmadaClient = karmadaClient
+	return g.HandleClusterScopeFlags()
+}
+
+// Validate checks the set of flags provided by the user.
+func (g *CommandGetOptions) Validate(cmd *cobra.Command) error {
+	if cmdutil.GetFlagBool(cmd, "show-labels") {
+		outputOption := cmd.Flags().Lookup("output").Value.String()
+		if outputOption != "" && outputOption != "wide" {
+			return fmt.Errorf("--show-labels option cannot be used with %s printer", outputOption)
+		}
+	}
+	if g.OutputWatchEvents && !(g.Watch || g.WatchOnly) {
+		return fmt.Errorf("--output-watch-events option can only be used with --watch or --watch-only")
+	}
+
+	if err := options.VerifyOperationScopeFlags(g.OperationScope); err != nil {
+		return err
+	}
+
+	if options.ContainMembersScope(g.OperationScope) && len(g.Clusters) > 0 {
+		clusters, err := g.KarmadaClient.ClusterV1alpha1().Clusters().List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		return util.VerifyClustersExist(g.Clusters, clusters)
+	}
+	return nil
+}
+
+func (g *CommandGetOptions) getResourcePrinter() func(mapping *meta.RESTMapping, outputObjects *bool, withNamespace bool, withKind bool) (printers.ResourcePrinterFunc, error) {
+	newScheme := gclient.NewSchema()
+	return func(mapping *meta.RESTMapping, outputObjects *bool, withNamespace bool, withKind bool) (printers.ResourcePrinterFunc, error) {
 		// make a new copy of current flags / opts before mutating
 		printFlags := g.PrintFlags.Copy()
 
@@ -230,53 +303,42 @@ func (g *CommandGetOptions) Complete(f util.Factory) error {
 
 		return printer.PrintObj, nil
 	}
-	karmadaClient, err := f.KarmadaClientSet()
-	if err != nil {
-		return err
+}
+
+// HandleClusterScopeFlags used to handle flags related to cluster scope.
+func (g *CommandGetOptions) HandleClusterScopeFlags() error {
+	var err error
+	switch g.OperationScope {
+	case options.KarmadaControlPlane:
+		g.TargetMemberClusters = []string{}
+	case options.Members, options.All:
+		if len(g.Clusters) == 0 {
+			g.TargetMemberClusters, err = LoadRegisteredClusters(g.KarmadaClient)
+			return err
+		}
+		g.TargetMemberClusters = g.Clusters
+		return nil
 	}
-	g.karmadaClient = karmadaClient
 	return nil
 }
 
-// Validate checks the set of flags provided by the user.
-func (g *CommandGetOptions) Validate(cmd *cobra.Command) error {
-	if cmdutil.GetFlagBool(cmd, "show-labels") {
-		outputOption := cmd.Flags().Lookup("output").Value.String()
-		if outputOption != "" && outputOption != "wide" {
-			return fmt.Errorf("--show-labels option cannot be used with %s printer", outputOption)
-		}
+func (g *CommandGetOptions) handleNamespaceScopeFlags(f util.Factory) error {
+	var err error
+	g.Namespace, g.ExplicitNamespace, err = f.ToRawKubeConfigLoader().Namespace()
+	if err != nil {
+		return err
 	}
-	if g.OutputWatchEvents && !(g.Watch || g.WatchOnly) {
-		return fmt.Errorf("--output-watch-events option can only be used with --watch or --watch-only")
-	}
-
-	if len(g.Clusters) > 0 {
-		clusters, err := g.karmadaClient.ClusterV1alpha1().Clusters().List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return err
-		}
-		clusterSet := sets.NewString()
-		for _, cluster := range clusters.Items {
-			clusterSet.Insert(cluster.Name)
-		}
-
-		var noneExistClusters []string
-		for _, cluster := range g.Clusters {
-			if !clusterSet.Has(cluster) {
-				noneExistClusters = append(noneExistClusters, cluster)
-			}
-		}
-		if len(noneExistClusters) != 0 {
-			return fmt.Errorf("clusters don't exist: " + strings.Join(noneExistClusters, ","))
-		}
+	if g.AllNamespaces {
+		g.ExplicitNamespace = false
 	}
 	return nil
 }
 
 // Obj cluster info
 type Obj struct {
-	Cluster string
-	Info    *resource.Info
+	Cluster        string
+	IsControlPlane bool
+	Info           *resource.Info
 }
 
 // WatchObj is a obj that is watched
@@ -285,16 +347,8 @@ type WatchObj struct {
 	r       *resource.Result
 }
 
-// RBInfo resourcebinding info and print info
-var RBInfo map[string]*OtherPrint
-
-// OtherPrint applied is used in the display column
-type OtherPrint struct {
-	Applied interface{}
-}
-
 // Run performs the get operation.
-func (g *CommandGetOptions) Run(f util.Factory, cmd *cobra.Command, args []string) error {
+func (g *CommandGetOptions) Run(f util.Factory, args []string) error {
 	mux := sync.Mutex{}
 	var wg sync.WaitGroup
 
@@ -302,41 +356,24 @@ func (g *CommandGetOptions) Run(f util.Factory, cmd *cobra.Command, args []strin
 	var watchObjs []WatchObj
 	var allErrs []error
 
-	if g.AllNamespaces {
-		g.ExplicitNamespace = false
+	if options.ContainKarmadaScope(g.OperationScope) {
+		g.getObjInfo(&mux, f, "Karmada", true, &objs, &watchObjs, &allErrs, args)
 	}
 
-	outputOption := cmd.Flags().Lookup("output").Value.String()
-	if strings.Contains(outputOption, "custom-columns") || outputOption == "yaml" || strings.Contains(outputOption, "json") {
-		g.ServerPrint = false
-	}
-
-	RBInfo = make(map[string]*OtherPrint)
-
-	if err := g.getRBInKarmada(); err != nil {
-		return err
-	}
-
-	if len(g.Clusters) == 0 {
-		clusterList, err := g.karmadaClient.ClusterV1alpha1().Clusters().List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to list all member clusters in control plane, err: %w", err)
+	if len(g.TargetMemberClusters) != 0 {
+		wg.Add(len(g.TargetMemberClusters))
+		for idx := range g.TargetMemberClusters {
+			memberFactory, err := f.FactoryForMemberCluster(g.TargetMemberClusters[idx])
+			if err != nil {
+				return err
+			}
+			go func() {
+				g.getObjInfo(&mux, memberFactory, g.TargetMemberClusters[idx], false, &objs, &watchObjs, &allErrs, args)
+				wg.Done()
+			}()
 		}
-
-		for i := range clusterList.Items {
-			g.Clusters = append(g.Clusters, clusterList.Items[i].Name)
-		}
+		wg.Wait()
 	}
-
-	wg.Add(len(g.Clusters))
-	for idx := range g.Clusters {
-		memberFactory, err := f.FactoryForMemberCluster(g.Clusters[idx])
-		if err != nil {
-			return err
-		}
-		go g.getObjInfo(&wg, &mux, memberFactory, g.Clusters[idx], &objs, &watchObjs, &allErrs, args)
-	}
-	wg.Wait()
 
 	if g.Watch || g.WatchOnly {
 		return g.watch(watchObjs)
@@ -440,12 +477,17 @@ func (g *CommandGetOptions) printObjs(objs []Obj, allErrs *[]error, _ []string) 
 
 // printIfNotFindResource is sure we output something if we wrote no output, and had no errors, and are not ignoring NotFound
 func (g *CommandGetOptions) printIfNotFindResource(written int, allErrs *[]error, allResourcesNamespaced bool) {
-	if written == 0 && !g.IgnoreNotFound && len(*allErrs) == 0 {
-		if allResourcesNamespaced {
-			fmt.Fprintf(g.ErrOut, "No resources found in %s namespace.\n", *options.DefaultConfigFlags.Namespace)
-		} else {
-			fmt.Fprintln(g.ErrOut, "No resources found")
-		}
+	if written != 0 || g.IgnoreNotFound || len(*allErrs) != 0 {
+		return
+	}
+	if !options.ContainKarmadaScope(g.OperationScope) && len(g.TargetMemberClusters) == 0 {
+		fmt.Fprintln(g.ErrOut, "No member Clusters found in Karmada control plane")
+		return
+	}
+	if allResourcesNamespaced {
+		fmt.Fprintf(g.ErrOut, "No resources found in %s namespace.\n", g.Namespace)
+	} else {
+		fmt.Fprintln(g.ErrOut, "No resources found")
 	}
 }
 
@@ -458,23 +500,24 @@ func (g *CommandGetOptions) checkPrintWithNamespace(mapping *meta.RESTMapping) b
 }
 
 // getObjInfo get obj info in member cluster
-func (g *CommandGetOptions) getObjInfo(wg *sync.WaitGroup, mux *sync.Mutex, f cmdutil.Factory,
-	cluster string, objs *[]Obj, watchObjs *[]WatchObj, allErrs *[]error, args []string,
+func (g *CommandGetOptions) getObjInfo(mux *sync.Mutex, f cmdutil.Factory,
+	cluster string, isControlPlane bool, objs *[]Obj, watchObjs *[]WatchObj, allErrs *[]error, args []string,
 ) {
-	defer wg.Done()
-
 	restClient, err := f.RESTClient()
 	if err != nil {
 		*allErrs = append(*allErrs, err)
 		return
 	}
 
-	// check if it is authorized to proxy this member cluster
-	request := restClient.Get().RequestURI(fmt.Sprintf(proxyURL, cluster) + "api")
-	if _, err := request.DoRaw(context.TODO()); err != nil {
-		*allErrs = append(*allErrs, fmt.Errorf("cluster(%s) is inaccessible, please check authorization or network", cluster))
-		return
+	if !isControlPlane {
+		// check if it is authorized to proxy this member cluster
+		request := restClient.Get().RequestURI(fmt.Sprintf(proxyURL, cluster) + "api")
+		if _, err := request.DoRaw(context.TODO()); err != nil {
+			*allErrs = append(*allErrs, fmt.Errorf("cluster(%s) is inaccessible, please check authorization or network", cluster))
+			return
+		}
 	}
+
 	r := f.NewBuilder().
 		Unstructured().
 		NamespaceParam(g.Namespace).DefaultNamespace().AllNamespaces(g.AllNamespaces).
@@ -526,8 +569,9 @@ func (g *CommandGetOptions) getObjInfo(wg *sync.WaitGroup, mux *sync.Mutex, f cm
 	var objInfo Obj
 	for ix := range infos {
 		objInfo = Obj{
-			Cluster: cluster,
-			Info:    infos[ix],
+			Cluster:        cluster,
+			IsControlPlane: isControlPlane,
+			Info:           infos[ix],
 		}
 		*objs = append(*objs, objInfo)
 	}
@@ -548,16 +592,29 @@ func (g *CommandGetOptions) reconstructionRow(objs []Obj, table *metav1.Table) (
 			return nil, nil, err
 		}
 		for rowIdx := range table.Rows {
-			var tempRow metav1.TableRow
-			rbKey := getRBKey(mapping.GroupVersionKind, table.Rows[rowIdx], objs[ix].Cluster)
+			var cells []interface{}
+			cells = append(cells, table.Rows[rowIdx].Cells[0])
+			cells = append(cells, objs[ix].Cluster)
+			cells = append(cells, table.Rows[rowIdx].Cells[1:]...)
+			table.Rows[rowIdx].Cells = cells
 
-			tempRow.Cells = append(append(tempRow.Cells, table.Rows[rowIdx].Cells[0], objs[ix].Cluster), table.Rows[rowIdx].Cells[1:]...)
-			if _, ok := RBInfo[rbKey]; ok {
-				tempRow.Cells = append(tempRow.Cells, "Y")
-			} else {
-				tempRow.Cells = append(tempRow.Cells, "N")
+			unObj := &unstructured.Unstructured{}
+			err := unObj.UnmarshalJSON(table.Rows[rowIdx].Object.Raw)
+			if err != nil {
+				klog.Errorf("Failed to unmarshal unObj, error is: %v", err)
+				continue
 			}
-			table.Rows[rowIdx].Cells = tempRow.Cells
+
+			if objs[ix].IsControlPlane {
+				table.Rows[rowIdx].Cells = append(table.Rows[rowIdx].Cells, notApplicable)
+				continue
+			}
+			v, exist := unObj.GetLabels()[karmadautil.ManagedByKarmadaLabel]
+			if exist && v == karmadautil.ManagedByKarmadaLabelValue {
+				table.Rows[rowIdx].Cells = append(table.Rows[rowIdx].Cells, managedByKarmada)
+			} else {
+				table.Rows[rowIdx].Cells = append(table.Rows[rowIdx].Cells, notManagedByKaramda)
+			}
 		}
 		allTableRows = append(allTableRows, table.Rows...)
 	}
@@ -578,20 +635,26 @@ func (g *CommandGetOptions) reconstructObj(obj runtime.Object, mapping *meta.RES
 	}
 
 	for rowIdx := range table.Rows {
-		var tempRow metav1.TableRow
-		rbKey := getRBKey(mapping.GroupVersionKind, table.Rows[rowIdx], cluster)
-
+		var cells []interface{}
 		if g.OutputWatchEvents {
-			tempRow.Cells = append(append(tempRow.Cells, event, table.Rows[rowIdx].Cells[0], cluster), table.Rows[rowIdx].Cells[1:]...)
+			cells = append(append(cells, event, table.Rows[rowIdx].Cells[0], cluster), table.Rows[rowIdx].Cells[1:]...)
 		} else {
-			tempRow.Cells = append(append(tempRow.Cells, table.Rows[rowIdx].Cells[0], cluster), table.Rows[rowIdx].Cells[1:]...)
+			cells = append(append(cells, table.Rows[rowIdx].Cells[0], cluster), table.Rows[rowIdx].Cells[1:]...)
 		}
-		if _, ok := RBInfo[rbKey]; ok {
-			tempRow.Cells = append(tempRow.Cells, "Y")
+		table.Rows[rowIdx].Cells = cells
+
+		unObj := &unstructured.Unstructured{}
+		err := unObj.UnmarshalJSON(table.Rows[rowIdx].Object.Raw)
+		if err != nil {
+			klog.Errorf("Failed to unmarshal unObj, error is: %v", err)
+			continue
+		}
+		v, exist := unObj.GetLabels()[karmadautil.ManagedByKarmadaLabel]
+		if exist && v == karmadautil.ManagedByKarmadaLabelValue {
+			table.Rows[rowIdx].Cells = append(table.Rows[rowIdx].Cells, "Y")
 		} else {
-			tempRow.Cells = append(tempRow.Cells, "N")
+			table.Rows[rowIdx].Cells = append(table.Rows[rowIdx].Cells, "N")
 		}
-		table.Rows[rowIdx].Cells = tempRow.Cells
 	}
 	allTableRows = append(allTableRows, table.Rows...)
 
@@ -624,7 +687,7 @@ func (g *CommandGetOptions) watch(watchObjs []WatchObj) error {
 
 	info := infos[0]
 	mapping := info.ResourceMapping()
-	outputObjects := utilpointer.Bool(!g.WatchOnly)
+	outputObjects := ptr.To[bool](!g.WatchOnly)
 
 	printer, err := g.ToPrinter(mapping, outputObjects, g.AllNamespaces, false)
 	if err != nil {
@@ -767,7 +830,7 @@ func (g *CommandGetOptions) printGeneric(r *resource.Result) error {
 
 	var obj runtime.Object
 	if !singleItemImplied || len(infos) != 1 {
-		// we have zero or multple items, so coerce all items into a list.
+		// we have zero or multiple items, so coerce all items into a list.
 		// we don't want an *unstructured.Unstructured list yet, as we
 		// may be dealing with non-unstructured objects. Compose all items
 		// into an corev1.List, and then decode using an unstructured scheme.
@@ -896,58 +959,6 @@ func (g *CommandGetOptions) transformRequests(req *rest.Request) {
 	}, ","))
 }
 
-func (g *CommandGetOptions) getRBInKarmada() error {
-	var rbList *workv1alpha2.ResourceBindingList
-	var crbList *workv1alpha2.ClusterResourceBindingList
-	var err error
-
-	if !g.AllNamespaces {
-		rbList, err = g.karmadaClient.WorkV1alpha2().ResourceBindings(*options.DefaultConfigFlags.Namespace).List(context.TODO(), metav1.ListOptions{})
-	} else {
-		rbList, err = g.karmadaClient.WorkV1alpha2().ResourceBindings(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
-	}
-	if err != nil {
-		return err
-	}
-
-	if crbList, err = g.karmadaClient.WorkV1alpha2().ClusterResourceBindings().List(context.TODO(), metav1.ListOptions{}); err != nil {
-		return err
-	}
-
-	for idx := range rbList.Items {
-		rbKey := rbList.Items[idx].GetName()
-		val := rbList.Items[idx].Status.AggregatedStatus
-		for i := range val {
-			if val[i].Applied && val[i].ClusterName != "" {
-				newRBKey := fmt.Sprintf("%s-%s", val[i].ClusterName, rbKey)
-				RBInfo[newRBKey] = &OtherPrint{
-					Applied: val[i].Applied,
-				}
-			}
-		}
-	}
-	for idx := range crbList.Items {
-		rbKey := crbList.Items[idx].GetName()
-		val := crbList.Items[idx].Status.AggregatedStatus
-		for i := range val {
-			if val[i].Applied && val[i].ClusterName != "" {
-				newRBKey := fmt.Sprintf("%s-%s", val[i].ClusterName, rbKey)
-				RBInfo[newRBKey] = &OtherPrint{
-					Applied: val[i].Applied,
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func getRBKey(gvk schema.GroupVersionKind, row metav1.TableRow, cluster string) string {
-	resourceName, _ := row.Cells[0].(string)
-	rbKey := names.GenerateBindingName(gvk.Kind, resourceName)
-
-	return fmt.Sprintf("%s-%s", cluster, rbKey)
-}
-
 func multipleGVKsRequested(objs []Obj) bool {
 	if len(objs) < 2 {
 		return false
@@ -1002,4 +1013,18 @@ func (p *skipPrinter) PrintObj(obj runtime.Object, writer io.Writer) error {
 	table = table.DeepCopy()
 	table.Rows = nil
 	return p.delegate.PrintObj(table, writer)
+}
+
+// LoadRegisteredClusters gets a list of register clusters.
+func LoadRegisteredClusters(clientSet karmadaclientset.Interface) ([]string, error) {
+	var clusters []string
+	clusterList, err := clientSet.ClusterV1alpha1().Clusters().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all member clusters in control plane, err: %w", err)
+	}
+
+	for i := range clusterList.Items {
+		clusters = append(clusters, clusterList.Items[i].Name)
+	}
+	return clusters, nil
 }

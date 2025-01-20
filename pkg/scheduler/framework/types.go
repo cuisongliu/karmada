@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package framework
 
 import (
@@ -9,8 +25,8 @@ import (
 )
 
 const (
-	// NoClusterAvailableMsg is used to format message when no clusters available.
-	NoClusterAvailableMsg = "0/%v clusters are available"
+	// noClusterAvailableMsg is used to format message when no clusters available.
+	noClusterAvailableMsg = "0/%d clusters are available: %s."
 )
 
 // ClusterToResultMap declares map from cluster name to its Result.
@@ -50,6 +66,10 @@ type FitError struct {
 
 // Error returns detailed information of why the object failed to fit on each cluster
 func (f *FitError) Error() string {
+	if f.NumAllClusters == 0 || len(f.Diagnosis.ClusterToResultMap) == 0 {
+		return fmt.Sprintf(noClusterAvailableMsg, f.NumAllClusters, "no cluster exists")
+	}
+
 	reasons := make(map[string]int)
 	for _, result := range f.Diagnosis.ClusterToResultMap {
 		for _, reason := range result.Reasons() {
@@ -65,6 +85,15 @@ func (f *FitError) Error() string {
 		sort.Strings(reasonStrings)
 		return reasonStrings
 	}
-	reasonMsg := fmt.Sprintf(NoClusterAvailableMsg+": %v.", f.NumAllClusters, strings.Join(sortReasonsHistogram(), ", "))
+	reasonMsg := fmt.Sprintf(noClusterAvailableMsg, f.NumAllClusters, strings.Join(sortReasonsHistogram(), ", "))
 	return reasonMsg
+}
+
+// UnschedulableError describes a unschedulable error, for example due to insufficient resources.
+type UnschedulableError struct {
+	Message string
+}
+
+func (u *UnschedulableError) Error() string {
+	return u.Message
 }

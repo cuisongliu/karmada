@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package options
 
 import (
@@ -15,7 +31,6 @@ type ModifyOptions func(option *Options)
 func New(modifyOptions ModifyOptions) Options {
 	option := Options{
 		SkippedPropagatingAPIs:       "cluster.karmada.io;policy.karmada.io;work.karmada.io",
-		SecurePort:                   8090,
 		ClusterStatusUpdateFrequency: metav1.Duration{Duration: 10 * time.Second},
 		ClusterLeaseDuration:         metav1.Duration{Duration: 10 * time.Second},
 		ClusterMonitorPeriod:         metav1.Duration{Duration: 10 * time.Second},
@@ -50,12 +65,6 @@ func TestValidateControllerManagerConfiguration(t *testing.T) {
 				options.SkippedPropagatingAPIs = "a/b/c/d?"
 			}),
 			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("SkippedPropagatingAPIs"), "a/b/c/d?", "Invalid API string")},
-		},
-		"invalid SecurePort": {
-			opt: New(func(options *Options) {
-				options.SecurePort = -10
-			}),
-			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("SecurePort"), -10, "must be between 0 and 65535 inclusive")},
 		},
 		"invalid ClusterStatusUpdateFrequency": {
 			opt: New(func(options *Options) {

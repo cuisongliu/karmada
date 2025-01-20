@@ -1,3 +1,19 @@
+/*
+Copyright 2020 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
@@ -6,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,15 +31,18 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	mapper "k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/kind/pkg/cluster"
-	"sigs.k8s.io/kind/pkg/exec"
+	kindexec "sigs.k8s.io/kind/pkg/exec"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	karmada "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
@@ -56,6 +77,14 @@ const (
 	roleBindingNamePrefix         = "rolebinding-"
 	clusterRoleBindingNamePrefix  = "clusterrolebinding-"
 	podDisruptionBudgetNamePrefix = "poddisruptionbudget-"
+	federatedHPANamePrefix        = "fhpa-"
+	cronFedratedHPANamePrefix     = "cronfhpa-"
+	resourceRegistryPrefix        = "rr-"
+	mcsNamePrefix                 = "mcs-"
+	ppNamePrefix                  = "pp-"
+	cppNamePrefix                 = "cpp-"
+	workloadRebalancerPrefix      = "rebalancer-"
+	remedyNamePrefix              = "remedy-"
 
 	updateDeploymentReplicas  = 2
 	updateStatefulSetReplicas = 2
@@ -76,11 +105,14 @@ var (
 var (
 	karmadaContext        string
 	kubeconfig            string
+	karmadactlPath        string
 	restConfig            *rest.Config
 	karmadaHost           string
 	kubeClient            kubernetes.Interface
 	karmadaClient         karmada.Interface
 	dynamicClient         dynamic.Interface
+	discoveryClient       *discovery.DiscoveryClient
+	restMapper            meta.RESTMapper
 	controlPlaneClient    client.Client
 	testNamespace         string
 	clusterProvider       *cluster.Provider
@@ -89,8 +121,8 @@ var (
 )
 
 func init() {
-	// usage ginkgo -- --poll-interval=5s --pollTimeout=5m
-	// eg. ginkgo -v --race --trace --fail-fast -p --randomize-all ./test/e2e/ -- --poll-interval=5s --pollTimeout=5m
+	// usage ginkgo -- --poll-interval=5s --poll-timeout=5m
+	// eg. ginkgo -v --race --trace --fail-fast -p --randomize-all ./test/e2e/ -- --poll-interval=5s --poll-timeout=5m
 	flag.DurationVar(&pollInterval, "poll-interval", 5*time.Second, "poll-interval defines the interval time for a poll operation")
 	flag.DurationVar(&pollTimeout, "poll-timeout", 300*time.Second, "poll-timeout defines the time which the poll operation times out")
 	flag.StringVar(&karmadaContext, "karmada-context", karmadaContext, "Name of the cluster context in control plane kubeconfig file.")
@@ -103,12 +135,19 @@ func TestE2E(t *testing.T) {
 
 var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	return nil
-}, func(bytes []byte) {
+}, func([]byte) {
 	kubeconfig = os.Getenv("KUBECONFIG")
 	gomega.Expect(kubeconfig).ShouldNot(gomega.BeEmpty())
 
+	goPathCmd := exec.Command("go", "env", "GOPATH")
+	goPath, err := goPathCmd.CombinedOutput()
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+
+	formatGoPath := strings.Trim(string(goPath), "\n")
+	karmadactlPath = formatGoPath + "/bin/karmadactl"
+	gomega.Expect(karmadactlPath).ShouldNot(gomega.BeEmpty())
+
 	clusterProvider = cluster.NewProvider()
-	var err error
 	restConfig, err = framework.LoadRESTClientConfig(kubeconfig, karmadaContext)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
@@ -123,6 +162,13 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	dynamicClient, err = dynamic.NewForConfig(restConfig)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
+	discoveryClient, err = discovery.NewDiscoveryClientForConfig(restConfig)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+
+	groupResources, err := mapper.GetAPIGroupResources(discoveryClient)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	restMapper = mapper.NewDiscoveryRESTMapper(groupResources)
+
 	controlPlaneClient = gclient.NewForConfigOrDie(restConfig)
 
 	framework.InitClusterInformation(karmadaClient, controlPlaneClient)
@@ -132,6 +178,13 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 	framework.WaitNamespacePresentOnClusters(framework.ClusterNames(), testNamespace)
+})
+
+var _ = ginkgo.JustAfterEach(func() {
+	// check if the current test case failed
+	if ginkgo.CurrentSpecReport().Failed() {
+		printAllBindingAndRelatedObjects()
+	}
 })
 
 var _ = ginkgo.SynchronizedAfterSuite(func() {
@@ -175,12 +228,12 @@ func createCluster(clusterName, kubeConfigPath, controlPlane, clusterContext str
 		return err
 	}
 
-	cmd := exec.Command(
+	cmd := kindexec.Command(
 		"docker", "inspect",
 		"--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
 		controlPlane,
 	)
-	lines, err := exec.OutputLines(cmd)
+	lines, err := kindexec.OutputLines(cmd)
 	if err != nil {
 		return err
 	}
@@ -208,16 +261,13 @@ func deleteCluster(clusterName, kubeConfigPath string) error {
 
 // deleteClusterLabel delete cluster label of E2E
 func deleteClusterLabel(c client.Client, clusterName string) error {
-	err := wait.PollImmediate(2*time.Second, 10*time.Second, func() (done bool, err error) {
+	err := wait.PollUntilContextTimeout(context.TODO(), 2*time.Second, 10*time.Second, true, func(ctx context.Context) (done bool, err error) {
 		clusterObj := &clusterv1alpha1.Cluster{}
-		if err := c.Get(context.TODO(), client.ObjectKey{Name: clusterName}, clusterObj); err != nil {
-			if apierrors.IsConflict(err) {
-				return false, nil
-			}
+		if err := c.Get(ctx, client.ObjectKey{Name: clusterName}, clusterObj); err != nil {
 			return false, err
 		}
 		delete(clusterObj.Labels, "location")
-		if err := c.Update(context.TODO(), clusterObj); err != nil {
+		if err := c.Update(ctx, clusterObj); err != nil {
 			if apierrors.IsConflict(err) {
 				return false, nil
 			}

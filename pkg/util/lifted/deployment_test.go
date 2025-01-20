@@ -1,3 +1,19 @@
+/*
+Copyright 2015 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package lifted
 
 import (
@@ -12,10 +28,44 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apiserver/pkg/storage/names"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
-// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.22/pkg/controller/deployment/util/deployment_util_test.go#LL151C1-L186C2
+// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/controller/deployment/util/deployment_util_test.go#L40-L49
+
+func newDControllerRef(d *appsv1.Deployment) *metav1.OwnerReference {
+	isController := true
+	return &metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       d.GetName(),
+		UID:        d.GetUID(),
+		Controller: &isController,
+	}
+}
+
+// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/controller/deployment/util/deployment_util_test.go#L51-L67
+// +lifted:changed
+
+// generateRS creates a replica set, with the input deployment's template as its template
+func generateRS(deployment appsv1.Deployment) appsv1.ReplicaSet {
+	template := deployment.Spec.Template.DeepCopy()
+	return appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:             "test",
+			Name:            names.SimpleNameGenerator.GenerateName("replicaset"),
+			Labels:          template.Labels,
+			OwnerReferences: []metav1.OwnerReference{*newDControllerRef(&deployment)},
+		},
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: new(int32),
+			Template: *template,
+			Selector: &metav1.LabelSelector{MatchLabels: template.Labels},
+		},
+	}
+}
+
+// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/controller/deployment/util/deployment_util_test.go#L73-L108
 
 // generateDeployment creates a deployment, with the input image as its template
 func generateDeployment(image string) appsv1.Deployment {
@@ -54,41 +104,7 @@ func generateDeployment(image string) appsv1.Deployment {
 	}
 }
 
-// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.22/pkg/controller/deployment/util/deployment_util_test.go#LL129C1-L145C2
-// +lifted:changed
-
-// generateRS creates a replica set, with the input deployment's template as its template
-func generateRS(deployment appsv1.Deployment) appsv1.ReplicaSet {
-	template := deployment.Spec.Template.DeepCopy()
-	return appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			UID:             "test",
-			Name:            names.SimpleNameGenerator.GenerateName("replicaset"),
-			Labels:          template.Labels,
-			OwnerReferences: []metav1.OwnerReference{*newDControllerRef(&deployment)},
-		},
-		Spec: appsv1.ReplicaSetSpec{
-			Replicas: new(int32),
-			Template: *template,
-			Selector: &metav1.LabelSelector{MatchLabels: template.Labels},
-		},
-	}
-}
-
-// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.22/pkg/controller/deployment/util/deployment_util_test.go#LL118C1-L127C2
-
-func newDControllerRef(d *appsv1.Deployment) *metav1.OwnerReference {
-	isController := true
-	return &metav1.OwnerReference{
-		APIVersion: "apps/v1",
-		Kind:       "Deployment",
-		Name:       d.GetName(),
-		UID:        d.GetUID(),
-		Controller: &isController,
-	}
-}
-
-// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.22/pkg/controller/deployment/util/deployment_util_test.go#L326
+// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/controller/deployment/util/deployment_util_test.go#L110-L121
 
 func generatePodTemplateSpec(name, nodeName string, annotations, labels map[string]string) corev1.PodTemplateSpec {
 	return corev1.PodTemplateSpec{
@@ -187,7 +203,7 @@ func TestListReplicaSetsByDeployment(t *testing.T) {
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					UID:        "test",
-					Controller: pointer.Bool(true),
+					Controller: ptr.To[bool](true),
 				},
 			},
 		},
@@ -197,7 +213,7 @@ func TestListReplicaSetsByDeployment(t *testing.T) {
 		name       string
 		deployment *appsv1.Deployment
 		rs         *appsv1.ReplicaSet
-		rsListFunc ReplicaSetListFunc
+		rsListFunc RsListFunc
 		wantErr    bool
 		wantRS     bool
 	}{
@@ -291,7 +307,7 @@ func TestListPodsByRS(t *testing.T) {
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					UID:        "test",
-					Controller: pointer.Bool(true),
+					Controller: ptr.To[bool](true),
 				},
 			},
 		},
@@ -329,7 +345,7 @@ func TestListPodsByRS(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								UID:        "test",
-								Controller: pointer.Bool(true),
+								Controller: ptr.To[bool](true),
 							},
 						},
 					},
@@ -369,7 +385,7 @@ func TestListPodsByRS(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								UID:        "test",
-								Controller: pointer.Bool(true),
+								Controller: ptr.To[bool](true),
 							},
 						},
 					},
@@ -405,7 +421,7 @@ func TestListPodsByRS(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								UID:        "test",
-								Controller: pointer.Bool(true),
+								Controller: ptr.To[bool](true),
 							},
 						},
 					},
@@ -431,7 +447,7 @@ func TestListPodsByRS(t *testing.T) {
 	}
 }
 
-// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.22/pkg/controller/deployment/util/deployment_util_test.go#L339
+// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/controller/deployment/util/deployment_util_test.go#L123-L214
 
 func TestEqualIgnoreHash(t *testing.T) {
 	tests := []struct {
@@ -535,7 +551,7 @@ func TestGetNewReplicaSet(t *testing.T) {
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					UID:        "test",
-					Controller: pointer.Bool(true),
+					Controller: ptr.To[bool](true),
 				},
 			},
 		},
@@ -601,7 +617,7 @@ func TestGetNewReplicaSet(t *testing.T) {
 	})
 }
 
-// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.22/pkg/controller/deployment/util/deployment_util_test.go#L432
+// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/controller/deployment/util/deployment_util_test.go#L216-L267
 
 func TestFindNewReplicaSet(t *testing.T) {
 	now := metav1.Now()

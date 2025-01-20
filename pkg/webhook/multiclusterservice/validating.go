@@ -1,14 +1,31 @@
+/*
+Copyright 2023 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package multiclusterservice
 
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/util/sets"
-	validation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -20,18 +37,17 @@ import (
 
 // ValidatingAdmission validates MultiClusterService object when creating/updating.
 type ValidatingAdmission struct {
-	decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
 // Check if our ValidatingAdmission implements necessary interface
 var _ admission.Handler = &ValidatingAdmission{}
-var _ admission.DecoderInjector = &ValidatingAdmission{}
 
 // Handle implements admission.Handler interface.
 // It yields a response to an AdmissionRequest.
-func (v *ValidatingAdmission) Handle(ctx context.Context, req admission.Request) admission.Response {
+func (v *ValidatingAdmission) Handle(_ context.Context, req admission.Request) admission.Response {
 	mcs := &networkingv1alpha1.MultiClusterService{}
-	err := v.decoder.Decode(req, mcs)
+	err := v.Decoder.Decode(req, mcs)
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
@@ -39,7 +55,7 @@ func (v *ValidatingAdmission) Handle(ctx context.Context, req admission.Request)
 
 	if req.Operation == admissionv1.Update {
 		oldMcs := &networkingv1alpha1.MultiClusterService{}
-		err = v.decoder.DecodeRaw(req.OldObject, oldMcs)
+		err = v.Decoder.DecodeRaw(req.OldObject, oldMcs)
 		if err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
@@ -56,17 +72,20 @@ func (v *ValidatingAdmission) Handle(ctx context.Context, req admission.Request)
 	return admission.Allowed("")
 }
 
-// InjectDecoder implements admission.DecoderInjector interface.
-// A decoder will be automatically injected.
-func (v *ValidatingAdmission) InjectDecoder(d *admission.Decoder) error {
-	v.decoder = d
-	return nil
-}
-
 func (v *ValidatingAdmission) validateMCSUpdate(oldMcs, newMcs *networkingv1alpha1.MultiClusterService) field.ErrorList {
 	allErrs := apimachineryvalidation.ValidateObjectMetaUpdate(&newMcs.ObjectMeta, &oldMcs.ObjectMeta, field.NewPath("metadata"))
+	allErrs = append(allErrs, v.validateMCSTypesUpdate(oldMcs, newMcs)...)
 	allErrs = append(allErrs, v.validateMCS(newMcs)...)
 	allErrs = append(allErrs, lifted.ValidateLoadBalancerStatus(&newMcs.Status.LoadBalancer, field.NewPath("status", "loadBalancer"))...)
+	return allErrs
+}
+
+func (v *ValidatingAdmission) validateMCSTypesUpdate(oldMcs, newMcs *networkingv1alpha1.MultiClusterService) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if !reflect.DeepEqual(oldMcs.Spec.Types, newMcs.Spec.Types) {
+		typePath := field.NewPath("spec").Child("types")
+		allErrs = append(allErrs, field.Invalid(typePath, oldMcs.Spec.Types, "MultiClusterService types are immutable"))
+	}
 	return allErrs
 }
 
@@ -89,16 +108,32 @@ func (v *ValidatingAdmission) validateMultiClusterServiceSpec(mcs *networkingv1a
 		port := mcs.Spec.Ports[i]
 		allErrs = append(allErrs, v.validateExposurePort(&port, allPortNames, portPath)...)
 	}
+
+	typesSet := sets.Set[string]{}
 	typesPath := specPath.Child("types")
-	for i := range mcs.Spec.Ports {
+	for i := range mcs.Spec.Types {
 		typePath := typesPath.Index(i)
 		exposureType := mcs.Spec.Types[i]
+		typesSet.Insert(string(exposureType))
 		allErrs = append(allErrs, v.validateExposureType(&exposureType, typePath)...)
 	}
-	clusterNamesPath := specPath.Child("range").Child("clusterNames")
-	for i := range mcs.Spec.Range.ClusterNames {
+	if len(typesSet) > 1 {
+		allErrs = append(allErrs, field.Invalid(typesPath, mcs.Spec.Types, "MultiClusterService types should not contain more than one type"))
+	}
+
+	clusterNamesPath := specPath.Child("range").Child("providerClusters")
+	for i := range mcs.Spec.ProviderClusters {
 		clusterNamePath := clusterNamesPath.Index(i)
-		clusterName := mcs.Spec.Range.ClusterNames[i]
+		clusterName := mcs.Spec.ProviderClusters[i].Name
+		if errMegs := clustervalidation.ValidateClusterName(clusterName); len(errMegs) > 0 {
+			allErrs = append(allErrs, field.Invalid(clusterNamePath, clusterName, strings.Join(errMegs, ",")))
+		}
+	}
+
+	clusterNamesPath = specPath.Child("range").Child("consumerClusters")
+	for i := range mcs.Spec.ConsumerClusters {
+		clusterNamePath := clusterNamesPath.Index(i)
+		clusterName := mcs.Spec.ConsumerClusters[i].Name
 		if errMegs := clustervalidation.ValidateClusterName(clusterName); len(errMegs) > 0 {
 			allErrs = append(allErrs, field.Invalid(clusterNamePath, clusterName, strings.Join(errMegs, ",")))
 		}

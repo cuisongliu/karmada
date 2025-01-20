@@ -1,10 +1,29 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package aggregatedapiserver
 
 import (
-	"k8s.io/apimachinery/pkg/version"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apiserver/pkg/util/version"
+	listcorev1 "k8s.io/client-go/listers/core/v1"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
 	clusterapis "github.com/karmada-io/karmada/pkg/apis/cluster"
@@ -41,19 +60,22 @@ type CompletedConfig struct {
 // Complete fills in any fields not set that are required to have valid data. It's mutating the receiver.
 func (cfg *Config) Complete() CompletedConfig {
 	c := completedConfig{
-		cfg.GenericConfig.Complete(),
-		&cfg.ExtraConfig,
+		GenericConfig: cfg.GenericConfig.Complete(),
+		ExtraConfig:   &cfg.ExtraConfig,
 	}
-
-	c.GenericConfig.Version = &version.Info{
-		Major: "1",
-		Minor: "0",
-	}
+	c.GenericConfig.EffectiveVersion = version.NewEffectiveVersion("1.0")
 
 	return CompletedConfig{&c}
 }
 
-func (c completedConfig) New(kubeClient kubernetes.Interface) (*APIServer, error) {
+var newClusterStorageBuilder = func(scheme *runtime.Scheme, restConfig *restclient.Config, secretLister listcorev1.SecretLister, optsGetter generic.RESTOptionsGetter) (*clusterstorage.ClusterStorage, error) {
+	return clusterstorage.NewStorage(scheme, restConfig, secretLister, optsGetter)
+}
+var apiGroupInstaller = func(server *APIServer, apiGroupInfo *genericapiserver.APIGroupInfo) error {
+	return server.GenericAPIServer.InstallAPIGroup(apiGroupInfo)
+}
+
+func (c completedConfig) New(restConfig *restclient.Config, secretLister listcorev1.SecretLister) (*APIServer, error) {
 	genericServer, err := c.GenericConfig.New("aggregated-apiserver", genericapiserver.NewEmptyDelegate())
 	if err != nil {
 		return nil, err
@@ -65,7 +87,7 @@ func (c completedConfig) New(kubeClient kubernetes.Interface) (*APIServer, error
 
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(clusterapis.GroupName, clusterscheme.Scheme, clusterscheme.ParameterCodec, clusterscheme.Codecs)
 
-	clusterStorage, err := clusterstorage.NewStorage(clusterscheme.Scheme, kubeClient, c.GenericConfig.RESTOptionsGetter)
+	clusterStorage, err := newClusterStorageBuilder(clusterscheme.Scheme, restConfig, secretLister, c.GenericConfig.RESTOptionsGetter)
 	if err != nil {
 		klog.Errorf("Unable to create REST storage for a resource due to %v, will die", err)
 		return nil, err
@@ -76,7 +98,7 @@ func (c completedConfig) New(kubeClient kubernetes.Interface) (*APIServer, error
 	v1alpha1cluster["clusters/proxy"] = clusterStorage.Proxy
 	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1cluster
 
-	if err = server.GenericAPIServer.InstallAPIGroup(&apiGroupInfo); err != nil {
+	if err = apiGroupInstaller(server, &apiGroupInfo); err != nil {
 		return nil, err
 	}
 

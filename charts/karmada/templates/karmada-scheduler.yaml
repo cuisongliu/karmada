@@ -41,6 +41,8 @@ spec:
       {{- toYaml . | nindent 8 }}
       {{- end }}
       automountServiceAccountToken: false
+      initContainers:
+        {{- include "karmada.initContainer.waitStaticResource" . | nindent 8 }}
       containers:
         - name: {{ $name }}-scheduler
           image: {{ template "karmada.scheduler.image" .}}
@@ -48,9 +50,12 @@ spec:
           command:
             - /bin/karmada-scheduler
             - --kubeconfig=/etc/kubeconfig
-            - --bind-address=0.0.0.0
-            - --secure-port=10351
+            - --metrics-bind-address=0.0.0.0:8080
+            - --health-probe-bind-address=0.0.0.0:10351
             - --leader-elect-resource-namespace={{ $systemNamespace }}
+            - --scheduler-estimator-ca-file=/etc/karmada/pki/server-ca.crt
+            - --scheduler-estimator-cert-file=/etc/karmada/pki/karmada.crt
+            - --scheduler-estimator-key-file=/etc/karmada/pki/karmada.key
           livenessProbe:
             httpGet:
               path: /healthz
@@ -60,12 +65,37 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 15
             timeoutSeconds: 5
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
           volumeMounts:
+            - name: karmada-certs
+              mountPath: /etc/karmada/pki
+              readOnly: true
           {{- include "karmada.kubeconfig.volumeMount" . | nindent 12 }}
           resources:
           {{- toYaml .Values.scheduler.resources | nindent 12 }}
       volumes:
       {{- include "karmada.kubeconfig.volume" . | nindent 8 }}
+      {{- include "karmada.scheduler.cert.volume" . | nindent 8 }}
+
+{{ if .Values.scheduler.podDisruptionBudget }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-scheduler
+  namespace: {{ include "karmada.namespace" . }}
+  labels:
+    {{- include "karmada.scheduler.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "karmada.scheduler.labels" . | nindent 6 }}
+  {{ toYaml .Values.scheduler.podDisruptionBudget | nindent 2 }}
+{{- end }}
+
 ---
 
 {{- end }}

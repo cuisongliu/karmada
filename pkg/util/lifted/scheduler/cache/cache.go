@@ -16,7 +16,7 @@ limitations under the License.
 
 // This code is directly lifted from the Kubernetes codebase in order to avoid relying on the k8s.io/kubernetes package.
 // For reference:
-// https://github.com/kubernetes/kubernetes/blob/release-1.25/pkg/scheduler/internal/cache/cache.go
+// https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/scheduler/internal/cache/cache.go
 
 package cache
 
@@ -745,6 +745,9 @@ func (cache *cacheImpl) run() {
 func (cache *cacheImpl) cleanupExpiredAssumedPods() {
 	cache.cleanupAssumedPods(time.Now())
 }
+
+// +lifted:source=https://github.com/kubernetes/kubernetes/blob/release-1.26/pkg/scheduler/internal/cache/cache.go#L738-L763
+// +lifted:changed
 
 // cleanupAssumedPods exists for making test deterministic by taking time as input argument.
 // It also reports metrics on the cache size for nodes, pods, and assumed pods.

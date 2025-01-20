@@ -23,27 +23,30 @@ This section describes how to install `karmada-operator` and create a Karmada in
 
 #### Helm install
 
-Go to the root directory of the `karmada-io/karmada` repo. To install the Helm Chart with
-the release name `karmada-operator` in the namespace `karmada-system`, simply run the helm command:
+Go to the root directory of the `karmada-io/karmada` repo. Before installing the Helm Chart, ensure the `karmada-operator` is set to the preferred released version. You can check the [latest tag on GitHub releases](https://github.com/karmada-io/karmada/releases/latest).
+
+To install the Helm Chart with the release name `karmada-operator` in the namespace `karmada-system`, run the following command, replacing `${preferred-released-version}` with the desired version:
 
 ```shell
-helm install karmada-operator -n karmada-system  --create-namespace ./charts/karmada-operator --debug
+helm install karmada-operator -n karmada-system --create-namespace --dependency-update ./charts/karmada-operator --set operator.image.tag=${preferred-released-version} --debug
 ```
 
 #### Using YAML resource
 
-The `karmada-operator` workload requires a kubeconfig of the local cluster to establish a connection with the cluster and watch CR resources.
-In preparation for this, create a secret containing the kubeconfig for the karmada-operator.
+The `karmada-operator` workload requires ClusterRole to watch and manage CR resources.
+In preparation for this, create a ClusterRole (with a ClusterRoleBinding and a ServiceAccount) containing the required privileges for the karmada-operator.
 
 ```shell
 kubectl create namespace karmada-system
-kubectl create secret generic my-kubeconfig --from-file=$HOME/.kube/config -n karmada-system
+kubectl apply -f operator/config/deploy/karmada-operator-clusterrole.yaml
+kubectl apply -f operator/config/deploy/karmada-operator-clusterrolebinding.yaml
+kubectl apply -f operator/config/deploy/karmada-operator-serviceaccount.yaml
 ```
 
 Deploy the `karmada-operator` workload.
 
 ```shell
-kubectl apply -f operator/config/deploy/karmada-operator.yaml
+kubectl apply -f operator/config/deploy/karmada-operator-deployment.yaml
 ```
 
 The pod of `karmada-operator` in the `karmada-system` namespace will be running.
@@ -82,6 +85,13 @@ metadata:
 EOF
 ```
 
+You can also create a Karmada CR directly using the sample provided by the Karmada operator.
+
+```shell
+kubectl create namespace test
+kubectl apply -f operator/config/samples/karmada.yaml
+```
+
 Wait for around 40 seconds, and the pods of the Karmada components will be running in the same namespace as the Karmada CR.
 
 ```shell
@@ -91,8 +101,17 @@ karmada-demo-apiserver-55968d9f8c-mp8hf                 1/1     Running   0     
 karmada-demo-controller-manager-64455f7fd4-stls6        1/1     Running   0          5s
 karmada-demo-etcd-0                                     1/1     Running   0          37s
 karmada-demo-kube-controller-manager-584f978bbd-fftwq   1/1     Running   0          5s
+karmada-demo-metrics-adapter-57cb5f56b6-4vwk2           1/1     Running   0          5s
+karmada-demo-metrics-adapter-57cb5f56b6-zbhjk           1/1     Running   0          5s
 karmada-demo-scheduler-6d77b7547-hgz8n                  1/1     Running   0          5s
 karmada-demo-webhook-6f5944f5d8-bpkqz                   1/1     Running   0          5s
+```
+
+### Generate kubeconfig for karmada
+
+```shell
+kubectl get secret -n test karmada-demo-admin-config -o jsonpath={.data.kubeconfig} | base64 -d > ~/.kube/karmada-apiserver.config
+export KUBECONFIG=~/.kube/karmada-apiserver.config
 ```
 
 > **Tip**:
@@ -143,12 +162,12 @@ you can run the following command before performing the deletion operation.
 kubectl label karmada karmada-demo -n test operator.karmada.io/disable-cascading-deletion=true
 ```
 
-### Custom Karmada CR
+## Custom Karmada CR
 
 This feature allows you to configure the Karmada CR to install Karmada instances flexibly.
 For details, see [karmada.yaml](./config/samples/karmada.yaml).
 
-#### Set Karmada component replicas
+### Set Karmada component replicas
 
 The `replicas` of all Karmada components can be modified.
 For example, you can scale the etcd pod `replicas` to 3:
@@ -166,7 +185,7 @@ spec:
         replicas: 3
 ```
 
-#### Custom label and annotation
+### Custom label and annotation
 
 All Karmada components allow for custom labels and annotations to be set.
 These are merged into both pod and workload resources.
@@ -186,7 +205,7 @@ spec:
         <custom-annotation-key>: <custom-annotation-value>
 ```
 
-#### Change karmada-apiserver service type
+### Change karmada-apiserver service type
 
 The service type of karmada-apiserver is `ClusterIP` by default.
 You can change it to `NodePort`:
@@ -195,14 +214,14 @@ You can change it to `NodePort`:
 ...
 karmadaAPIServer:
   imageRepository: registry.k8s.io/kube-apiserver
-  imageTag: v1.25.4
+  imageTag: v1.31.3
   replicas: 1
   serviceType: NodePort
   serviceSubnet: 10.96.0.0/12
 ...
 ```
 
-#### Add karmada-apiserver SANs
+### Add karmada-apiserver SANs
 
 You can add more SANs to karmada-apiserver certificate:
 
@@ -210,7 +229,7 @@ You can add more SANs to karmada-apiserver certificate:
 ...
 karmadaAPIServer:
   imageRepository: registry.k8s.io/kube-apiserver
-  imageTag: v1.25.4
+  imageTag: v1.31.3
   replicas: 1
   serviceSubnet: 10.96.0.0/12
   certSANs:
@@ -219,7 +238,7 @@ karmadaAPIServer:
 ...
 ```
 
-#### Install karmada addon
+### Install karmada addon
 
 By default, the Karmada operator does not install the `descheduler` and `search` addons.
 If you want to use them, you should add definitions to the Karmada CR.
@@ -233,14 +252,60 @@ metadata:
   namespace: test
 spec:
   components:
-    KarmadaDescheduler: {}
+    karmadaDescheduler: {}
 ```
 
 If you want to install with the defaults, simply define an empty struct for `descheduler`.
 
-> **Tip**:
->
-> Now, we only support installing the `descheduler` addon.
+### Expose Karmada API Server
+By default, the Karmada API Server's Service type is set to `ClusterIP`, which means it can only be accessed within 
+the Kubernetes cluster. If you wish to access the Karmada API Server from outside the cluster, there are several 
+methods to expose it. The following will introduce these methods and provide the necessary configuration steps.
+
+#### Using a LoadBalancer Service Type
+If your Kubernetes cluster runs on a cloud provider that supports LoadBalancer (such as AWS, GCP, Azure, etc.), 
+you can change the Karmada API Server's Service type to `LoadBalancer`. This will automatically allocate or use an 
+external IP address for the Karmada API Server, allowing you to access it from outside the cluster.
+
+#### Using a NodePort Service Type
+You also can change the Karmada API Server's Service type to `NodePort`. This exposes the Karmada API Server on a 
+specific port on each node, allowing you to access it via any node's IP address and that port.
+
+#### Using an Ingress Controller
+If you already have an [Ingress controller](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/)
+deployed in your cluster, you can create an `Ingress` resource to expose the Karmada API Server. The Ingress controller 
+will route external traffic to the Karmada API Server's Service, enabling external access.
+
+For example, you can create a following Ingress resource to route external traffic to the Karmada API Server:
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: karmada-apiserver-ingress
+  namespace: karmada-system
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: karmada.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: karmada-apiserver
+            port:
+              number: 443
+```
+
+#### Using Port Forwarding
+If you only need temporary access to the Karmada API Server or prefer not to permanently expose it, you can use kubectl 
+[port-forward](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/) to
+forward a local port to the Karmada API Server's Pod. This method is ideal for development and debugging but is not 
+recommended for production environments.
 
 ## Contributing
 

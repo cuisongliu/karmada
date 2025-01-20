@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package certificate
 
 import (
@@ -34,7 +50,7 @@ import (
 )
 
 const (
-	// CertRotationControllerName is the controller name that will be used when reporting events.
+	// CertRotationControllerName is the controller name that will be used when reporting events and metrics.
 	CertRotationControllerName = "cert-rotation-controller"
 
 	// SignerName defines the signer name for csr, 'kubernetes.io/kube-apiserver-client-kubelet' can sign the csr automatically
@@ -82,7 +98,7 @@ func (c *CertRotationController) Reconcile(ctx context.Context, req controllerru
 			return controllerruntime.Result{}, nil
 		}
 
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	if !cluster.DeletionTimestamp.IsZero() {
@@ -93,18 +109,18 @@ func (c *CertRotationController) Reconcile(ctx context.Context, req controllerru
 	c.ClusterClient, err = c.ClusterClientSetFunc(cluster.Name, c.Client, c.ClusterClientOption)
 	if err != nil {
 		klog.Errorf("Failed to create a ClusterClient for the given member cluster: %s, err is: %v", cluster.Name, err)
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	secret, err := c.ClusterClient.KubeClient.CoreV1().Secrets(c.KarmadaKubeconfigNamespace).Get(ctx, KarmadaKubeconfigName, metav1.GetOptions{})
 	if err != nil {
 		klog.Errorf("failed to get karmada kubeconfig secret: %v", err)
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
-	if err = c.syncCertRotation(secret); err != nil {
+	if err = c.syncCertRotation(ctx, secret); err != nil {
 		klog.Errorf("Failed to rotate the certificate of karmada-agent for the given member cluster: %s, err is: %v", cluster.Name, err)
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	return controllerruntime.Result{RequeueAfter: c.CertRotationCheckingInterval}, nil
@@ -113,15 +129,16 @@ func (c *CertRotationController) Reconcile(ctx context.Context, req controllerru
 // SetupWithManager creates a controller and register to controller manager.
 func (c *CertRotationController) SetupWithManager(mgr controllerruntime.Manager) error {
 	return controllerruntime.NewControllerManagedBy(mgr).
+		Named(CertRotationControllerName).
 		For(&clusterv1alpha1.Cluster{}, builder.WithPredicates(c.PredicateFunc)).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		WithOptions(controller.Options{
-			RateLimiter: ratelimiterflag.DefaultControllerRateLimiter(c.RatelimiterOptions),
+			RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](c.RatelimiterOptions),
 		}).
 		Complete(c)
 }
 
-func (c *CertRotationController) syncCertRotation(secret *corev1.Secret) error {
+func (c *CertRotationController) syncCertRotation(ctx context.Context, secret *corev1.Secret) error {
 	karmadaKubeconfig, err := getKubeconfigFromSecret(secret)
 	if err != nil {
 		return err
@@ -158,15 +175,15 @@ func (c *CertRotationController) syncCertRotation(secret *corev1.Secret) error {
 		return fmt.Errorf("invalid private key for certificate request: %v", err)
 	}
 
-	csr, err := c.createCSRInControlPlane(clusterName, privateKey, oldCert)
+	csr, err := c.createCSRInControlPlane(ctx, clusterName, privateKey, oldCert)
 	if err != nil {
 		return fmt.Errorf("failed to create csr in control plane, err is: %v", err)
 	}
 
 	var newCertData []byte
 	klog.V(1).Infof("Waiting for the client certificate to be issued")
-	err = wait.Poll(1*time.Second, 5*time.Minute, func() (done bool, err error) {
-		csr, err := c.KubeClient.CertificatesV1().CertificateSigningRequests().Get(context.TODO(), csr, metav1.GetOptions{})
+	err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 5*time.Minute, false, func(context.Context) (done bool, err error) {
+		csr, err := c.KubeClient.CertificatesV1().CertificateSigningRequests().Get(ctx, csr, metav1.GetOptions{})
 		if err != nil {
 			return false, fmt.Errorf("failed to get the cluster csr %s. err: %v", clusterName, err)
 		}
@@ -194,7 +211,7 @@ func (c *CertRotationController) syncCertRotation(secret *corev1.Secret) error {
 
 	secret.Data["karmada-kubeconfig"] = karmadaKubeconfigBytes
 	// Update the karmada-kubeconfig secret in the member cluster.
-	if _, err := c.ClusterClient.KubeClient.CoreV1().Secrets(secret.Namespace).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
+	if _, err := c.ClusterClient.KubeClient.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("unable to update secret, err: %w", err)
 	}
 
@@ -209,7 +226,7 @@ func (c *CertRotationController) syncCertRotation(secret *corev1.Secret) error {
 	return nil
 }
 
-func (c *CertRotationController) createCSRInControlPlane(clusterName string, privateKey interface{}, oldCert []*x509.Certificate) (string, error) {
+func (c *CertRotationController) createCSRInControlPlane(ctx context.Context, clusterName string, privateKey interface{}, oldCert []*x509.Certificate) (string, error) {
 	csrData, err := certutil.MakeCSR(privateKey, &oldCert[0].Subject, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("unable to generate certificate request: %v", err)
@@ -223,9 +240,6 @@ func (c *CertRotationController) createCSRInControlPlane(clusterName string, pri
 	certificateSigningRequest := &certificatesv1.CertificateSigningRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: csrName,
-			Labels: map[string]string{
-				util.ManagedByKarmadaLabel: util.ManagedByKarmadaLabelValue,
-			},
 		},
 		Spec: certificatesv1.CertificateSigningRequestSpec{
 			Request:           csrData,
@@ -239,7 +253,7 @@ func (c *CertRotationController) createCSRInControlPlane(clusterName string, pri
 		},
 	}
 
-	_, err = c.KubeClient.CertificatesV1().CertificateSigningRequests().Create(context.TODO(), certificateSigningRequest, metav1.CreateOptions{})
+	_, err = c.KubeClient.CertificatesV1().CertificateSigningRequests().Create(ctx, certificateSigningRequest, metav1.CreateOptions{})
 	if err != nil {
 		return "", fmt.Errorf("unable to create certificate request in control plane: %v", err)
 	}

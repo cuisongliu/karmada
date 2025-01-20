@@ -102,12 +102,27 @@ push-chart:
 	helm push _output/charts/karmada-chart-${VERSION}.tgz oci://docker.io/karmada
 	helm push _output/charts/karmada-operator-chart-${VERSION}.tgz oci://docker.io/karmada
 
+GOTESTSUM_REGISTRY:=gotest.tools/gotestsum
+GOTESTSUM_VERSION:=ec99a250836f069a524bb9d9b5de0a7a96334ea7 # v1.11.0
+GOTESTSUM_FLAGS?=--format testname
+GOTESTSUM_ENABLED?=
+GOTEST=go test
+
+.PHONY: install_gotestsum
+install_gotestsum:
+ifdef GOTESTSUM_ENABLED
+	go install ${GOTESTSUM_REGISTRY}@${GOTESTSUM_VERSION}
+GOTEST=gotestsum ${GOTESTSUM_FLAGS} --
+endif
+
 .PHONY: test
-test:
+test: GO_TEST_FLAGS ?= --race --v -covermode=atomic
+test: install_gotestsum
 	mkdir -p ./_output/coverage/
-	go test --race --v ./pkg/... -coverprofile=./_output/coverage/coverage_pkg.txt -covermode=atomic
-	go test --race --v ./cmd/... -coverprofile=./_output/coverage/coverage_cmd.txt -covermode=atomic
-	go test --race --v ./examples/... -coverprofile=./_output/coverage/coverage_examples.txt -covermode=atomic
+	$(GOTEST) $(GO_TEST_FLAGS) ./pkg/... -coverprofile=./_output/coverage/coverage_pkg.txt
+	$(GOTEST) $(GO_TEST_FLAGS) ./cmd/... -coverprofile=./_output/coverage/coverage_cmd.txt
+	$(GOTEST) $(GO_TEST_FLAGS) ./examples/... -coverprofile=./_output/coverage/coverage_examples.txt
+	$(GOTEST) $(GO_TEST_FLAGS) ./operator/... -coverprofile=./_output/coverage/coverage_operator.txt
 
 upload-images: images
 	@echo "push images to $(REGISTRY)"

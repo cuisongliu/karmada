@@ -1,11 +1,25 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package app
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"net"
-	"strconv"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,14 +27,16 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	kubeclientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/term"
 	"k8s.io/klog/v2"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/config/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	crtlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/karmada-io/karmada/cmd/agent/app/options"
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
@@ -29,7 +45,9 @@ import (
 	controllerscontext "github.com/karmada-io/karmada/pkg/controllers/context"
 	"github.com/karmada-io/karmada/pkg/controllers/execution"
 	"github.com/karmada-io/karmada/pkg/controllers/mcs"
+	"github.com/karmada-io/karmada/pkg/controllers/multiclusterservice"
 	"github.com/karmada-io/karmada/pkg/controllers/status"
+	"github.com/karmada-io/karmada/pkg/features"
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util/apiclient"
 	"github.com/karmada-io/karmada/pkg/metrics"
@@ -55,11 +73,11 @@ func NewAgentCommand(ctx context.Context) *cobra.Command {
 	opts := options.NewOptions()
 
 	cmd := &cobra.Command{
-		Use: "karmada-agent",
+		Use: names.KarmadaAgentComponentName,
 		Long: `The karmada-agent is the agent of member clusters. It can register a specific cluster to the Karmada control
-plane and sync manifests from the Karmada control plane to the member cluster. In addition, it also syncs the status of member 
+plane and sync manifests from the Karmada control plane to the member cluster. In addition, it also syncs the status of member
 cluster and manifests to the Karmada control plane.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// validate options
 			if errs := opts.Validate(); len(errs) != 0 {
 				return errs.ToAggregate()
@@ -89,7 +107,7 @@ cluster and manifests to the Karmada control plane.`,
 	logsFlagSet := fss.FlagSet("logs")
 	klogflag.Add(logsFlagSet)
 
-	cmd.AddCommand(sharedcommand.NewCmdVersion("karmada-agent"))
+	cmd.AddCommand(sharedcommand.NewCmdVersion(names.KarmadaAgentComponentName))
 	cmd.Flags().AddFlagSet(genericFlagSet)
 	cmd.Flags().AddFlagSet(logsFlagSet)
 
@@ -110,6 +128,7 @@ func init() {
 	controllers["workStatus"] = startWorkStatusController
 	controllers["serviceExport"] = startServiceExportController
 	controllers["certRotation"] = startCertRotationController
+	controllers["endpointsliceCollect"] = startEndpointSliceCollectController
 }
 
 func run(ctx context.Context, opts *options.Options) error {
@@ -139,6 +158,7 @@ func run(ctx context.Context, opts *options.Options) error {
 		ProxyServerAddress: opts.ProxyServerAddress,
 		ClusterProvider:    opts.ClusterProvider,
 		ClusterRegion:      opts.ClusterRegion,
+		ClusterZones:       opts.ClusterZones,
 		DryRun:             false,
 		ControlPlaneConfig: controlPlaneRestConfig,
 		ClusterConfig:      clusterConfig,
@@ -175,8 +195,7 @@ func run(ctx context.Context, opts *options.Options) error {
 
 	controllerManager, err := controllerruntime.NewManager(controlPlaneRestConfig, controllerruntime.Options{
 		Scheme:                     gclient.NewSchema(),
-		SyncPeriod:                 &opts.ResyncPeriod.Duration,
-		Namespace:                  executionSpace,
+		Cache:                      cache.Options{SyncPeriod: &opts.ResyncPeriod.Duration, DefaultNamespaces: map[string]cache.Config{executionSpace: {}}},
 		LeaderElection:             opts.LeaderElection.LeaderElect,
 		LeaderElectionID:           fmt.Sprintf("karmada-agent-%s", opts.ClusterName),
 		LeaderElectionNamespace:    opts.LeaderElection.ResourceNamespace,
@@ -184,22 +203,24 @@ func run(ctx context.Context, opts *options.Options) error {
 		LeaseDuration:              &opts.LeaderElection.LeaseDuration.Duration,
 		RenewDeadline:              &opts.LeaderElection.RenewDeadline.Duration,
 		RetryPeriod:                &opts.LeaderElection.RetryPeriod.Duration,
-		HealthProbeBindAddress:     net.JoinHostPort(opts.BindAddress, strconv.Itoa(opts.SecurePort)),
+		HealthProbeBindAddress:     opts.HealthProbeBindAddress,
 		LivenessEndpointName:       "/healthz",
-		MetricsBindAddress:         opts.MetricsBindAddress,
+		Metrics:                    metricsserver.Options{BindAddress: opts.MetricsBindAddress},
 		MapperProvider:             restmapper.MapperProvider,
 		BaseContext: func() context.Context {
 			return ctx
 		},
-		Controller: v1alpha1.ControllerConfigurationSpec{
+		Controller: config.Controller{
 			GroupKindConcurrency: map[string]int{
 				workv1alpha1.SchemeGroupVersion.WithKind("Work").GroupKind().String():       opts.ConcurrentWorkSyncs,
 				clusterv1alpha1.SchemeGroupVersion.WithKind("Cluster").GroupKind().String(): opts.ConcurrentClusterSyncs,
 			},
+			CacheSyncTimeout: opts.ClusterCacheSyncTimeout.Duration,
 		},
-		NewCache: cache.BuilderWithOptions(cache.Options{
-			DefaultTransform: fedinformer.StripUnusedFields,
-		}),
+		NewCache: func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
+			opts.DefaultTransform = fedinformer.StripUnusedFields
+			return cache.New(config, opts)
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to build controller manager: %w", err)
@@ -367,6 +388,28 @@ func startServiceExportController(ctx controllerscontext.Context) (bool, error) 
 	return true, nil
 }
 
+func startEndpointSliceCollectController(ctx controllerscontext.Context) (enabled bool, err error) {
+	if !features.FeatureGate.Enabled(features.MultiClusterService) {
+		return false, nil
+	}
+	opts := ctx.Opts
+	endpointSliceCollectController := &multiclusterservice.EndpointSliceCollectController{
+		Client:                      ctx.Mgr.GetClient(),
+		RESTMapper:                  ctx.Mgr.GetRESTMapper(),
+		InformerManager:             genericmanager.GetInstance(),
+		StopChan:                    ctx.StopChan,
+		WorkerNumber:                3,
+		PredicateFunc:               helper.NewPredicateForEndpointSliceCollectControllerOnAgent(opts.ClusterName),
+		ClusterDynamicClientSetFunc: util.NewClusterDynamicClientSet,
+		ClusterCacheSyncTimeout:     opts.ClusterCacheSyncTimeout,
+	}
+	endpointSliceCollectController.RunWorkQueue()
+	if err := endpointSliceCollectController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func startCertRotationController(ctx controllerscontext.Context) (bool, error) {
 	certRotationController := &certificate.CertRotationController{
 		Client:                             ctx.Mgr.GetClient(),
@@ -398,17 +441,16 @@ func generateClusterInControllerPlane(opts util.ClusterRegisterOption) (*cluster
 			cluster.Spec.Provider = opts.ClusterProvider
 		}
 
-		if opts.ClusterZone != "" {
-			cluster.Spec.Zone = opts.ClusterZone
+		if len(opts.ClusterZones) > 0 {
+			cluster.Spec.Zones = opts.ClusterZones
 		}
 
 		if opts.ClusterRegion != "" {
 			cluster.Spec.Region = opts.ClusterRegion
 		}
 
-		if opts.ClusterConfig.TLSClientConfig.Insecure {
-			cluster.Spec.InsecureSkipTLSVerification = true
-		}
+		cluster.Spec.InsecureSkipTLSVerification = opts.ClusterConfig.TLSClientConfig.Insecure
+
 		if opts.ClusterConfig.Proxy != nil {
 			url, err := opts.ClusterConfig.Proxy(nil)
 			if err != nil {

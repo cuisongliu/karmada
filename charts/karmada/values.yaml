@@ -11,6 +11,27 @@ global:
   ##   - myRegistryKeySecretName
   imagePullSecrets: []
 
+  ## #param global.commonLabels Common labels applied to all resources
+  ## E.g.
+  ## commonLabels:
+  ##   team: infra
+  commonLabels: {}
+
+## @karmadaImageVersion the image version of each karmada components
+## "latest" is a default value for local installation.
+## If update this anchors("&karmadaImageVersion"), also update hack/package-helm-chart.sh.
+## See https://yaml.org/spec/1.2/spec.html#id2765878 and
+## https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_advanced_syntax.html#yaml-anchors-and-aliases-sharing-variable-values
+## for more details about yaml anchors and aliases.
+karmadaImageVersion: &karmadaImageVersion latest
+
+## Specify the imagePullPolicy of karmada images
+## Defaults to 'IfNotPresent', you can set to 'Always' in cases of special needs
+karmadaImagePullPolicy: &karmadaImagePullPolicy IfNotPresent
+
+podDisruptionBudget: &podDisruptionBudget {}
+  # maxUnavailable: 20%
+
 ## @param installMode "host" and "agent" are provided
 ## "host" means install karmada in the control-cluster
 ## "agent" means install agent client in the member cluster
@@ -34,44 +55,70 @@ cfssl:
   ## @param image.registry karmada cfssl image registry
   ## @param image.repository karmada cfssl image repository
   ## @param image.tag karmada cfssl image tag (immutable tags are recommended)
+  ## @param image.pullSecrets Specify docker-registry secret names as an array
   ##
   image:
     registry: docker.io
     repository: cfssl/cfssl
     tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
+    ## Specify a imagePullPolicy, defaults to 'IfNotPresent'
+    pullPolicy: IfNotPresent
+    ## Optionally specify an array of imagePullSecrets.
+    ## Secrets must be manually created in the namespace.
+    ## Example:
+    ## pullSecrets:
+    ##   - myRegistryKeySecretName
     ##
-    pullPolicy: Always
+    pullSecrets: []
 
 kubectl:
   ## @param image.registry karmada kubectl image registry
   ## @param image.repository karmada kubectl image repository
   ## @param image.tag karmada kubectl image tag (immutable tags are recommended)
+  ## @param image.pullSecrets Specify docker-registry secret names as an array
   ##
   image:
     registry: docker.io
     repository: bitnami/kubectl
     tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
+    ## Specify a imagePullPolicy, defaults to 'IfNotPresent'
+    pullPolicy: IfNotPresent
+    ## Optionally specify an array of imagePullSecrets.
+    ## Secrets must be manually created in the namespace.
+    ## Example:
+    ## pullSecrets:
+    ##   - myRegistryKeySecretName
     ##
-    pullPolicy: Always
+    pullSecrets: []
 
 ## pre-install job config
 preInstallJob:
   tolerations: []
   nodeSelector: {}
+  ## Define policies that determine when to delete corresponding hook resources: before-hook-creation,hook-succeeded,hook-failed
+  hookDeletePolicy: "hook-succeeded"
+
+## static-resource job config
+staticResourceJob:
+  tolerations: []
+  nodeSelector: {}
+  ## Set a TTL for the static-resource Job, the Job will be automatically cleaned up after this time.
+  ## This only works on Kubernetes version 1.23 or higher.
+  ttlSecondsAfterFinished: 10
 
 ## post-install job config
 postInstallJob:
   tolerations: []
   nodeSelector: {}
+  ## Define policies that determine when to delete corresponding hook resources: before-hook-creation,hook-succeeded,hook-failed
+  hookDeletePolicy: "hook-succeeded"
 
 ## post-delete job config
 postDeleteJob:
   tolerations: []
   nodeSelector: {}
+  ## Define policies that determine when to delete corresponding hook resources: before-hook-creation,hook-succeeded,hook-failed
+  hookDeletePolicy: "hook-succeeded"
 
 ## karmada certificate config
 certs:
@@ -91,6 +138,8 @@ certs:
       "localhost",
       "127.0.0.1"
     ]
+    ## @param certs.auto.rsaSize rsa key size of the certificate
+    rsaSize: 3072
   custom:
     ## @param certs.custom.caCrt ca of the certificate
     caCrt: |
@@ -148,11 +197,8 @@ scheduler:
   image:
     registry: docker.io
     repository: karmada/karmada-scheduler
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -184,6 +230,8 @@ scheduler:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 50%
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
 
 ## webhook config
 webhook:
@@ -205,11 +253,8 @@ webhook:
   image:
     registry: docker.io
     repository: karmada/karmada-webhook
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -241,6 +286,8 @@ webhook:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 50%
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
 
 ## controller manager config
 controllerManager:
@@ -262,11 +309,8 @@ controllerManager:
   image:
     registry: docker.io
     repository: karmada/karmada-controller-manager
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -306,6 +350,8 @@ controllerManager:
   controllers: ""
   ## @param extraCommandArgs to extraCommandArgs
   extraCommandArgs: {}
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
 
 ## karmada apiserver config
 apiServer:
@@ -328,10 +374,8 @@ apiServer:
   image:
     registry: registry.k8s.io
     repository: kube-apiserver
-    tag: "v1.25.4"
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
+    tag: "v1.31.3"
+    ## Specify a imagePullPolicy, defaults to 'IfNotPresent'
     pullPolicy: IfNotPresent
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
@@ -380,6 +424,7 @@ apiServer:
   ## will take effect when 'apiServer.serviceType' is 'NodePort'.
   ## If no port is specified, the nodePort will be automatically assigned.
   nodePort: 0
+  serviceClusterIPRange: "10.96.0.0/12"
   maxRequestsInflight: 1500
   maxMutatingRequestsInflight: 500
   ## @param apiserver.strategy strategy of the apiserver
@@ -388,6 +433,8 @@ apiServer:
     rollingUpdate:
       maxUnavailable: 1
       maxSurge: 1
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
 
 ## karmada aggregated apiserver config
 aggregatedApiServer:
@@ -409,11 +456,8 @@ aggregatedApiServer:
   image:
     registry: docker.io
     repository: karmada/karmada-aggregated-apiserver
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -447,6 +491,66 @@ aggregatedApiServer:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 50%
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
+
+## karmada metrics adapter config
+metricsAdapter:
+  ## @param metricsAdapter.labels labels of the karmada-metrics-adapter pods
+  labels:
+    app: karmada-metrics-adapter
+  ## @param metricsAadpter.replicaCount target replicas of the karmada-mertics-adapter
+  replicaCount: 1
+  ## @param metricsAadpter.podAnnotations annotations of the karmada-mertics-adapter pods
+  podAnnotations: {}
+  ## @param metricsAadpter.podLabels labels of the karmada-mertics-adapter pods
+  podLabels: {}
+  ## @param image.registry karmada metricsAadpter image registry
+  ## @param image.repository karmada metricsAadpter image repository
+  ## @param image.tag karmada metricsAadpter image tag (immutable tags are recommended)
+  ## @param image.pullPolicy karmada metricsAadpter image pull policy
+  ## @param image.pullSecrets Specify docker-registry secret names as an array
+  ##
+  image:
+    registry: docker.io
+    repository: karmada/karmada-metrics-adapter
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
+    ## Optionally specify an array of imagePullSecrets.
+    ## Secrets must be manually created in the namespace.
+    ## Example:
+    ## pullSecrets:
+    ##   - myRegistryKeySecretName
+    ##
+    pullSecrets: []
+  ## @param metricsAadpter.resources resource quota of the karmada-mertics-adapter
+  resources:
+    requests:
+      cpu: 100m
+    # If you do want to specify resources, uncomment the following
+    # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+  ## @param metricsAadpter.nodeSelector node selector of the karmada-mertics-adapter
+  nodeSelector: {}
+  ## @param metricsAadpter.affinity affinity of the karmada-mertics-adapter
+  affinity: {}
+  ## @param metricsAadpter.tolerations tolerations of the karmada-mertics-adapter
+  tolerations: []
+    # - key: node-role.kubernetes.io/master
+    #   operator: Exists
+  ## @param metricsAadpter.strategy strategy of the karmada-mertics-adapter
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 50%
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
 
 ## kubernetes controller manager config
 kubeControllerManager:
@@ -468,10 +572,8 @@ kubeControllerManager:
   image:
     registry: registry.k8s.io
     repository: kube-controller-manager
-    tag: "v1.25.4"
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
+    tag: "v1.31.3"
+    ## Specify a imagePullPolicy, defaults to 'IfNotPresent'
     pullPolicy: IfNotPresent
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
@@ -505,7 +607,11 @@ kubeControllerManager:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 50%
-  controllers: namespace,garbagecollector,serviceaccount-token,ttl-after-finished,bootstrapsigner,tokencleaner,csrapproving,csrcleaner,csrsigning
+  controllers: namespace,garbagecollector,serviceaccount-token,ttl-after-finished,bootstrapsigner,tokencleaner,csrcleaner,csrsigning,clusterrole-aggregation
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
+  serviceClusterIPRange: "10.96.0.0/12"
+  clusterCIDR: "10.244.0.0/16"
 
 ## etcd config
 etcd:
@@ -562,10 +668,8 @@ etcd:
     image:
       registry: registry.k8s.io
       repository: etcd
-      tag: "3.5.3-0"
-      ## Specify a imagePullPolicy
-      ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-      ##
+      tag: "3.5.16-0"
+      ## Specify a imagePullPolicy, defaults to 'IfNotPresent'
       pullPolicy: IfNotPresent
     ## @param etcd.internal.storageType storage type for etcd data
     ## "pvc" means using volumeClaimTemplates
@@ -636,11 +740,8 @@ agent:
   image:
     registry: docker.io
     repository: karmada/karmada-agent
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -672,35 +773,39 @@ agent:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 50%
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
 
 ## karmada scheduler estimator
 schedulerEstimator:
-  ## schedulerEstimator.clusterName the name of the member cluster
-  clusterName: ""
-  ## kubeconfig of the member cluster
-  kubeconfig:
-    ## @param schedulerEstimator.kubeconfig.caCrt ca of the certificate
-    caCrt: |
-      -----BEGIN CERTIFICATE-----
-      XXXXXXXXXXXXXXXXXXXXXXXXXXX
-      -----END CERTIFICATE-----
-    ## @param schedulerEstimator.kubeconfig.crt crt of the certificate
-    crt: |
-      -----BEGIN CERTIFICATE-----
-      XXXXXXXXXXXXXXXXXXXXXXXXXXX
-      -----END CERTIFICATE-----
-    ## @param schedulerEstimator.kubeconfig.key key of the certificate
-    key: |
-      -----BEGIN RSA PRIVATE KEY-----
-      XXXXXXXXXXXXXXXXXXXXXXXXXXX
-      -----END RSA PRIVATE KEY-----
-    ## @param schedulerEstimator.kubeconfig.server apiserver of the member cluster
-    server: ""
+  ## @param schedulerEstimator.memberClusters each cluster requires an estimator component, fill in the information for each cluster
+  memberClusters:
+      ## @param schedulerEstimator.memberClusterInfo[0].clusterName the name of the member cluster
+    - clusterName: ""
+      ## @param schedulerEstimator.memberClusterInfo[0].replicaCount target replicas
+      replicaCount: 1
+      ## kubeconfig of the member cluster
+      kubeconfig:
+        ## @param schedulerEstimator.memberClusterInfo[0].kubeconfig.server apiserver of the member cluster
+        server: ""
+        ## @param schedulerEstimator.memberClusterInfo[0].kubeconfig.caCrt ca of the certificate
+        caCrt: |
+          -----BEGIN CERTIFICATE-----
+          XXXXXXXXXXXXXXXXXXXXXXXXXXX
+          -----END CERTIFICATE-----
+        ## @param schedulerEstimator.memberClusterInfo[0].kubeconfig.crt crt of the certificate
+        crt: |
+          -----BEGIN CERTIFICATE-----
+          XXXXXXXXXXXXXXXXXXXXXXXXXXX
+          -----END CERTIFICATE-----
+        ## @param schedulerEstimator.memberClusterInfo[0].kubeconfig.key key of the certificate
+        key: |
+          -----BEGIN RSA PRIVATE KEY-----
+          XXXXXXXXXXXXXXXXXXXXXXXXXXX
+          -----END RSA PRIVATE KEY-----
   ## @param schedulerEstimator.labels labels of the scheduler-estimator deployment
   labels:
     app: karmada-scheduler-estimator
-  ## @param schedulerEstimator.replicaCount target replicas
-  replicaCount: 1
   ## @param schedulerEstimator.podAnnotations annotations of the scheduler-estimator pods
   podAnnotations: {}
   ## @param schedulerEstimator.podLabels labels of the scheduler-estimator pods
@@ -714,11 +819,8 @@ schedulerEstimator:
   image:
     registry: docker.io
     repository: karmada/karmada-scheduler-estimator
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -750,6 +852,11 @@ schedulerEstimator:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 50%
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
+  ## @param featureGate to schedulerEstimator
+  # FooPluginName: true
+  featureGates: {}
 
 ## descheduler config
 descheduler:
@@ -771,11 +878,8 @@ descheduler:
   image:
     registry: docker.io
     repository: karmada/karmada-descheduler
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -809,6 +913,8 @@ descheduler:
       maxSurge: 50%
   ## @param descheduler.kubeconfig kubeconfig of the descheduler
   kubeconfig: karmada-kubeconfig
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget
 
 ## karmada-search config
 search:
@@ -830,11 +936,8 @@ search:
   image:
     registry: docker.io
     repository: karmada/karmada-search
-    tag: latest
-    ## Specify a imagePullPolicy
-    ## Defaults to 'Always' if image tag is 'latest', else set to 'IfNotPresent'
-    ##
-    pullPolicy: Always
+    tag: *karmadaImageVersion
+    pullPolicy: *karmadaImagePullPolicy
     ## Optionally specify an array of imagePullSecrets.
     ## Secrets must be manually created in the namespace.
     ## Example:
@@ -870,3 +973,5 @@ search:
   certs: karmada-cert
   ## @param search.kubeconfig kubeconfig of the search
   kubeconfig: karmada-kubeconfig
+  ## @param apiServer.podDisruptionBudget
+  podDisruptionBudget: *podDisruptionBudget

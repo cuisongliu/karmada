@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package client
 
 import (
@@ -38,7 +54,8 @@ func (ge *GeneralEstimator) MaxAvailableReplicas(_ context.Context, clusters []*
 }
 
 func (ge *GeneralEstimator) maxAvailableReplicas(cluster *clusterv1alpha1.Cluster, replicaRequirements *workv1alpha2.ReplicaRequirements) int32 {
-	resourceSummary := cluster.Status.ResourceSummary
+	//Note: resourceSummary must be deep-copied before using in the function to avoid modifying the original data structure.
+	resourceSummary := cluster.Status.ResourceSummary.DeepCopy()
 	if resourceSummary == nil {
 		return 0
 	}
@@ -96,8 +113,8 @@ func getAllowedPodNumber(resourceSummary *clusterv1alpha1.ResourceSummary) int64
 	return allowedPodNumber
 }
 
-func convertToResourceModelsMinMap(models []clusterv1alpha1.ResourceModel) map[clusterv1alpha1.ResourceName][]resource.Quantity {
-	resourceModelsMinMap := make(map[clusterv1alpha1.ResourceName][]resource.Quantity)
+func convertToResourceModelsMinMap(models []clusterv1alpha1.ResourceModel) map[corev1.ResourceName][]resource.Quantity {
+	resourceModelsMinMap := make(map[corev1.ResourceName][]resource.Quantity)
 	for _, model := range models {
 		for _, resourceModelRange := range model.Ranges {
 			resourceModelsMinMap[resourceModelRange.Name] = append(resourceModelsMinMap[resourceModelRange.Name], resourceModelRange.Min)
@@ -107,7 +124,7 @@ func convertToResourceModelsMinMap(models []clusterv1alpha1.ResourceModel) map[c
 	return resourceModelsMinMap
 }
 
-func getNodeAvailableReplicas(modelIndex int, replicaRequirements *workv1alpha2.ReplicaRequirements, resourceModelsMinMap map[clusterv1alpha1.ResourceName][]resource.Quantity) int64 {
+func getNodeAvailableReplicas(modelIndex int, replicaRequirements *workv1alpha2.ReplicaRequirements, resourceModelsMinMap map[corev1.ResourceName][]resource.Quantity) int64 {
 	var maximumReplicasOneNode int64 = math.MaxInt64
 	for key, value := range replicaRequirements.ResourceRequest {
 		requestedQuantity := value.Value()
@@ -115,7 +132,7 @@ func getNodeAvailableReplicas(modelIndex int, replicaRequirements *workv1alpha2.
 			continue
 		}
 
-		availableMinBoundary := resourceModelsMinMap[clusterv1alpha1.ResourceName(key)][modelIndex]
+		availableMinBoundary := resourceModelsMinMap[key][modelIndex]
 
 		availableQuantity := availableMinBoundary.Value()
 		if key == corev1.ResourceCPU {
@@ -188,33 +205,20 @@ func getMaximumReplicasBasedOnResourceModels(cluster *clusterv1alpha1.Cluster, r
 			continue
 		}
 
-		quantityArray, ok := resourceModelsMinMap[clusterv1alpha1.ResourceName(key)]
+		quantityArray, ok := resourceModelsMinMap[key]
 		if !ok {
 			return -1, fmt.Errorf("resource model is inapplicable as missing resource: %s", string(key))
 		}
 
-		for index, minValue := range quantityArray {
-			// Suppose there is the following resource model:
-			// Model1: cpu [1C,2C)
-			// Model2: cpu [2C,3C)
-			// if pod cpu request is 1.5C, we regard the nodes in model1 as meeting the requirements of the Pod.
-			// Suppose there is the following resource model:
-			// Model1: cpu [1C,2C), memory [1Gi,2Gi)
-			// Model2: cpu [2C,3C), memory [2Gi,3Gi)
-			// if pod cpu request is 1.5C and memory request is 2.5Gi
-			// We regard the node of model1 as not meeting the requirements, and the nodes of model2 and later as meeting the requirements.
-			if minValue.Cmp(value) > 0 {
-				// Since the 'min' value of the first model is always 0, hit here
-				// the index should be >=1, so it's safe to use 'index-1' here.
-				if index-1 > minCompliantModelIndex {
-					minCompliantModelIndex = index - 1
-				}
-				break
-			}
-
-			if index == len(quantityArray)-1 {
-				minCompliantModelIndex = index
-			}
+		// Find the minimum model grade for each type of resource quest, if no
+		// suitable model is found indicates that there is no appropriate model
+		// grade and return immediately.
+		minCompliantModelIndexForResource := minimumModelIndex(quantityArray, value)
+		if minCompliantModelIndexForResource == -1 {
+			return 0, nil
+		}
+		if minCompliantModelIndex <= minCompliantModelIndexForResource {
+			minCompliantModelIndex = minCompliantModelIndexForResource
 		}
 	}
 
@@ -227,4 +231,19 @@ func getMaximumReplicasBasedOnResourceModels(cluster *clusterv1alpha1.Cluster, r
 	}
 
 	return maximumReplicasForResource, nil
+}
+
+func minimumModelIndex(minimumGrades []resource.Quantity, requestValue resource.Quantity) int {
+	for index, minValue := range minimumGrades {
+		// Suppose there is the following resource model:
+		// Grade1: cpu [1C,2C)
+		// Grade2: cpu [2C,3C)
+		// If a Pod requests 1.5C of CPU, grade1 may not be able to provide sufficient resources,
+		// so we will choose grade2.
+		if minValue.Cmp(requestValue) >= 0 {
+			return index
+		}
+	}
+
+	return -1
 }

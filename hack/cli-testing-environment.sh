@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2023 The Karmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -16,8 +30,31 @@ KUBECONFIG_PATH=${KUBECONFIG_PATH:-"${HOME}/.kube"}
 HOST_CLUSTER_NAME=${HOST_CLUSTER_NAME:-"karmada-host"}
 MEMBER_CLUSTER_1_NAME=${MEMBER_CLUSTER_1_NAME:-"member1"}
 MEMBER_CLUSTER_2_NAME=${MEMBER_CLUSTER_2_NAME:-"member2"}
-CLUSTER_VERSION=${CLUSTER_VERSION:-"kindest/node:v1.26.0"}
+CLUSTER_VERSION=${CLUSTER_VERSION:-"${DEFAULT_CLUSTER_VERSION}"}
 BUILD_PATH=${BUILD_PATH:-"_output/bin/linux/amd64"}
+
+
+# install kind and kubectl
+kind_version=v0.25.0
+echo -n "Preparing: 'kind' existence check - "
+if util::cmd_exist kind; then
+  echo "passed"
+else
+  echo "not pass"
+  util::install_tools "sigs.k8s.io/kind" $kind_version
+fi
+# get arch name and os name in bootstrap
+BS_ARCH=$(go env GOARCH)
+BS_OS=$(go env GOOS)
+# check arch and os name before installing
+util::install_environment_check "${BS_ARCH}" "${BS_OS}"
+echo -n "Preparing: 'kubectl' existence check - "
+if util::cmd_exist kubectl; then
+  echo "passed"
+else
+  echo "not pass"
+  util::install_kubectl "" "${BS_ARCH}" "${BS_OS}"
+fi
 
 # prepare the newest crds
 echo "Prepare the newest crds"
@@ -25,6 +62,11 @@ cd  charts/karmada/
 cp -r _crds crds
 tar -zcvf ../../crds.tar.gz crds
 cd -
+
+# make images
+export VERSION="latest"
+export REGISTRY="docker.io/karmada"
+make images GOOS="linux" --directory="${REPO_ROOT}"
 
 # make karmadactl binary
 make karmadactl
@@ -52,9 +94,19 @@ util::wait_context_exist "${MEMBER_CLUSTER_2_NAME}" ${KUBECONFIG_PATH}/${MEMBER_
 kubectl wait --for=condition=Ready nodes --all --timeout=800s --kubeconfig=${KUBECONFIG_PATH}/${MEMBER_CLUSTER_2_NAME}.config
 util::wait_nodes_taint_disappear 800 ${KUBECONFIG_PATH}/${MEMBER_CLUSTER_2_NAME}.config
 
+# load components images to kind cluster
+kind load docker-image "${REGISTRY}/karmada-controller-manager:${VERSION}" --name="${HOST_CLUSTER_NAME}"
+kind load docker-image "${REGISTRY}/karmada-scheduler:${VERSION}" --name="${HOST_CLUSTER_NAME}"
+kind load docker-image "${REGISTRY}/karmada-webhook:${VERSION}" --name="${HOST_CLUSTER_NAME}"
+kind load docker-image "${REGISTRY}/karmada-aggregated-apiserver:${VERSION}" --name="${HOST_CLUSTER_NAME}"
+
 # init Karmada control plane
 echo "Start init karmada control plane..."
 ${BUILD_PATH}/karmadactl init --kubeconfig=${KUBECONFIG_PATH}/${HOST_CLUSTER_NAME}.config \
+    --karmada-controller-manager-image="${REGISTRY}/karmada-controller-manager:${VERSION}" \
+    --karmada-scheduler-image="${REGISTRY}/karmada-scheduler:${VERSION}" \
+    --karmada-webhook-image="${REGISTRY}/karmada-webhook:${VERSION}" \
+    --karmada-aggregated-apiserver-image="${REGISTRY}/karmada-aggregated-apiserver:${VERSION}" \
     --karmada-data=${HOME}/karmada \
     --karmada-pki=${HOME}/karmada/pki \
     --crds=./crds.tar.gz

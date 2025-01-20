@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
@@ -29,7 +45,7 @@ var _ = ginkgo.Describe("[namespace auto-provision] namespace auto-provision tes
 	var f cmdutil.Factory
 
 	ginkgo.BeforeEach(func() {
-		namespaceName = "karmada-e2e-ns-" + rand.String(3)
+		namespaceName = "karmada-e2e-ns-" + rand.String(RandomStrLength)
 		namespace = helper.NewNamespace(namespaceName)
 
 		defaultConfigFlags := genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag().WithDiscoveryBurst(300).WithDiscoveryQPS(50.0)
@@ -70,7 +86,7 @@ var _ = ginkgo.Describe("[namespace auto-provision] namespace auto-provision tes
 		var clusterContext string
 
 		ginkgo.BeforeEach(func() {
-			clusterName = "member-e2e-" + rand.String(3)
+			clusterName = "member-e2e-" + rand.String(RandomStrLength)
 			homeDir = os.Getenv("HOME")
 			kubeConfigPath = fmt.Sprintf("%s/.kube/%s.config", homeDir, clusterName)
 			controlPlane = fmt.Sprintf("%s-control-plane", clusterName)
@@ -89,7 +105,7 @@ var _ = ginkgo.Describe("[namespace auto-provision] namespace auto-provision tes
 		})
 
 		ginkgo.BeforeEach(func() {
-			ginkgo.By(fmt.Sprintf("Joinning cluster: %s", clusterName), func() {
+			ginkgo.By(fmt.Sprintf("Joining cluster: %s", clusterName), func() {
 				opts := join.CommandJoinOption{
 					DryRun:            false,
 					ClusterNamespace:  "karmada-cluster",
@@ -135,8 +151,8 @@ var _ = ginkgo.Describe("[namespace auto-provision] namespace auto-provision tes
 				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 				clusterClient, err := util.NewClusterClientSet(clusterJoined.Name, controlPlaneClient, nil)
 				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-				err = wait.PollImmediate(pollInterval, pollTimeout, func() (done bool, err error) {
-					_, err = clusterClient.KubeClient.CoreV1().Namespaces().Get(context.TODO(), namespaceName, metav1.GetOptions{})
+				err = wait.PollUntilContextTimeout(context.TODO(), pollInterval, pollTimeout, true, func(ctx context.Context) (done bool, err error) {
+					_, err = clusterClient.KubeClient.CoreV1().Namespaces().Get(ctx, namespaceName, metav1.GetOptions{})
 					if err != nil {
 						if apierrors.IsNotFound(err) {
 							return false, nil

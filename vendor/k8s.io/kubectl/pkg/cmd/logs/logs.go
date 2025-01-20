@@ -29,9 +29,11 @@ import (
 	"github.com/spf13/cobra"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/rest"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/polymorphichelpers"
@@ -97,6 +99,7 @@ type LogsOptions struct {
 	Namespace     string
 	ResourceArg   string
 	AllContainers bool
+	AllPods       bool
 	Options       runtime.Object
 	Resources     []string
 
@@ -120,22 +123,22 @@ type LogsOptions struct {
 	MaxFollowConcurrency   int
 	Prefix                 bool
 
-	Object           runtime.Object
-	GetPodTimeout    time.Duration
-	RESTClientGetter genericclioptions.RESTClientGetter
-	LogsForObject    polymorphichelpers.LogsForObjectFunc
+	Object              runtime.Object
+	GetPodTimeout       time.Duration
+	RESTClientGetter    genericclioptions.RESTClientGetter
+	LogsForObject       polymorphichelpers.LogsForObjectFunc
+	AllPodLogsForObject polymorphichelpers.AllPodLogsForObjectFunc
 
-	genericclioptions.IOStreams
+	genericiooptions.IOStreams
 
 	TailSpecified bool
 
 	containerNameFromRefSpecRegexp *regexp.Regexp
 }
 
-func NewLogsOptions(streams genericclioptions.IOStreams, allContainers bool) *LogsOptions {
+func NewLogsOptions(streams genericiooptions.IOStreams) *LogsOptions {
 	return &LogsOptions{
 		IOStreams:            streams,
-		AllContainers:        allContainers,
 		Tail:                 -1,
 		MaxFollowConcurrency: 5,
 
@@ -144,8 +147,8 @@ func NewLogsOptions(streams genericclioptions.IOStreams, allContainers bool) *Lo
 }
 
 // NewCmdLogs creates a new pod logs command
-func NewCmdLogs(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
-	o := NewLogsOptions(streams, false)
+func NewCmdLogs(f cmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Command {
+	o := NewLogsOptions(streams)
 
 	cmd := &cobra.Command{
 		Use:                   logsUsageStr,
@@ -165,6 +168,7 @@ func NewCmdLogs(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.C
 }
 
 func (o *LogsOptions) AddFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&o.AllPods, "all-pods", o.AllPods, "Get logs from all pod(s). Sets prefix to true.")
 	cmd.Flags().BoolVar(&o.AllContainers, "all-containers", o.AllContainers, "Get all containers' logs in the pod(s).")
 	cmd.Flags().BoolVarP(&o.Follow, "follow", "f", o.Follow, "Specify if the logs should be streamed.")
 	cmd.Flags().BoolVar(&o.Timestamps, "timestamps", o.Timestamps, "Include timestamps on each line in the log output")
@@ -241,6 +245,11 @@ func (o *LogsOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []str
 	default:
 		return cmdutil.UsageErrorf(cmd, "%s", logsUsageErrStr)
 	}
+
+	if o.AllPods {
+		o.Prefix = true
+	}
+
 	var err error
 	o.Namespace, _, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
@@ -261,6 +270,7 @@ func (o *LogsOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []str
 
 	o.RESTClientGetter = f
 	o.LogsForObject = polymorphichelpers.LogsForObjectFn
+	o.AllPodLogsForObject = polymorphichelpers.AllPodLogsForObjectFn
 
 	if o.Object == nil {
 		builder := f.NewBuilder().
@@ -275,6 +285,9 @@ func (o *LogsOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []str
 		}
 		infos, err := builder.Do().Infos()
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				err = fmt.Errorf("error from server (NotFound): %w in namespace %q", err, o.Namespace)
+			}
 			return err
 		}
 		if o.Selector == "" && len(infos) != 1 {
@@ -323,7 +336,13 @@ func (o LogsOptions) Validate() error {
 
 // RunLogs retrieves a pod log
 func (o LogsOptions) RunLogs() error {
-	requests, err := o.LogsForObject(o.RESTClientGetter, o.Object, o.Options, o.GetPodTimeout, o.AllContainers)
+	var requests map[corev1.ObjectReference]rest.ResponseWrapper
+	var err error
+	if o.AllPods {
+		requests, err = o.AllPodLogsForObject(o.RESTClientGetter, o.Object, o.Options, o.GetPodTimeout, o.AllContainers)
+	} else {
+		requests, err = o.LogsForObject(o.RESTClientGetter, o.Object, o.Options, o.GetPodTimeout, o.AllContainers)
+	}
 	if err != nil {
 		return err
 	}

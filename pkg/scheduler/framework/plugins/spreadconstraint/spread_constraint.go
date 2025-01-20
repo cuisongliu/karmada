@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package spreadconstraint
 
 import (
@@ -38,11 +54,11 @@ func (p *SpreadConstraint) Filter(
 ) *framework.Result {
 	for _, spreadConstraint := range bindingSpec.Placement.SpreadConstraints {
 		if spreadConstraint.SpreadByField == policyv1alpha1.SpreadByFieldProvider && cluster.Spec.Provider == "" {
-			return framework.NewResult(framework.Unschedulable, "cluster(s) didn't have provider property")
+			return framework.NewResult(framework.Unschedulable, "cluster(s) did not have provider property")
 		} else if spreadConstraint.SpreadByField == policyv1alpha1.SpreadByFieldRegion && cluster.Spec.Region == "" {
-			return framework.NewResult(framework.Unschedulable, "cluster(s) didn't have region property")
-		} else if spreadConstraint.SpreadByField == policyv1alpha1.SpreadByFieldZone && cluster.Spec.Zone == "" {
-			return framework.NewResult(framework.Unschedulable, "cluster(s) didn't have zone property")
+			return framework.NewResult(framework.Unschedulable, "cluster(s) did not have region property")
+		} else if spreadConstraint.SpreadByField == policyv1alpha1.SpreadByFieldZone && len(cluster.Spec.Zones) == 0 {
+			return framework.NewResult(framework.Unschedulable, "cluster(s) did not have zones property")
 		}
 	}
 

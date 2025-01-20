@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package util
 
 import (
@@ -13,6 +29,8 @@ import (
 	"k8s.io/klog/v2"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	aggregator "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
+
+	"github.com/karmada-io/karmada/pkg/util"
 )
 
 // CreateService creates a Service if the target resource doesn't exist.
@@ -78,7 +96,7 @@ func CreateOrUpdateDeployment(client kubernetes.Interface, deploy *appsv1.Deploy
 
 // CreateOrUpdateAPIService creates a ApiService if the target resource doesn't exist.
 // If the resource exists already, this function will update the resource instead.
-func CreateOrUpdateAPIService(apiRegistrationClient *aggregator.Clientset, apiservice *apiregistrationv1.APIService) error {
+func CreateOrUpdateAPIService(apiRegistrationClient aggregator.Interface, apiservice *apiregistrationv1.APIService) error {
 	if _, err := apiRegistrationClient.ApiregistrationV1().APIServices().Create(context.TODO(), apiservice, metav1.CreateOptions{}); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("unable to create APIService: %v", err)
@@ -198,7 +216,7 @@ func CreateOrUpdateClusterRoleBinding(client kubernetes.Interface, clusterRoleBi
 
 // CreateOrUpdateConfigMap creates a ConfigMap if the target resource doesn't exist.
 // If the resource exists already, this function will update the resource instead.
-func CreateOrUpdateConfigMap(client *kubernetes.Clientset, cm *corev1.ConfigMap) error {
+func CreateOrUpdateConfigMap(client kubernetes.Interface, cm *corev1.ConfigMap) error {
 	if _, err := client.CoreV1().ConfigMaps(cm.Namespace).Create(context.TODO(), cm, metav1.CreateOptions{}); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("unable to create ConfigMap: %v", err)
@@ -225,6 +243,9 @@ func NewNamespace(name string) *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
+			Labels: map[string]string{
+				util.KarmadaSystemLabel: util.KarmadaSystemLabelValue,
+			},
 		},
 	}
 }

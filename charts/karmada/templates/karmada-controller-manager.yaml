@@ -8,9 +8,6 @@ metadata:
   namespace: {{ include "karmada.namespace" . }}
   labels:
   {{- include "karmada.cm.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": post-install
-    "helm.sh/hook-weight": "2"
 spec:
   replicas: {{  .Values.controllerManager.replicaCount }}
   selector:
@@ -46,6 +43,8 @@ spec:
       {{- end }}
       volumes:
       {{- include "karmada.kubeconfig.volume" . | nindent 8 }}
+      initContainers:
+        {{- include "karmada.initContainer.waitStaticResource" . | nindent 8 }}
       containers:
         - name: {{ $name }}-controller-manager
           image: {{ template "karmada.controllerManager.image" . }}
@@ -53,10 +52,10 @@ spec:
           command:
             - /bin/karmada-controller-manager
             - --kubeconfig=/etc/kubeconfig
-            - --bind-address=0.0.0.0
             - --cluster-status-update-frequency=10s
-            - --secure-port=10357
             - --leader-elect-resource-namespace={{ $systemNamespace }}
+            - --health-probe-bind-address=0.0.0.0:10357
+            - --metrics-bind-address=:8080
             - --v=2
             {{- if .Values.controllerManager.controllers }}
             - --controllers={{ .Values.controllerManager.controllers }}
@@ -74,9 +73,29 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 15
             timeoutSeconds: 5
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
           volumeMounts:
           {{- include "karmada.kubeconfig.volumeMount" . | nindent 12 }}
           resources:
           {{- toYaml .Values.controllerManager.resources | nindent 12 }}
+
+{{ if .Values.controllerManager.podDisruptionBudget }}
 ---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-controller-manager
+  namespace: {{ include "karmada.namespace" . }}
+  labels:
+    {{- include "karmada.cm.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "karmada.cm.labels" . | nindent 6 }}
+  {{ toYaml .Values.controllerManager.podDisruptionBudget | nindent 2 }}
+{{- end -}}
+
 {{- end }}

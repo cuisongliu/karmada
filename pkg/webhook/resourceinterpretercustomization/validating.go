@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package resourceinterpretercustomization
 
 import (
@@ -11,22 +27,21 @@ import (
 	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
 )
 
-// Check if our ValidatingAdmission implements necessary interface
-var _ admission.Handler = &ValidatingAdmission{}
-var _ admission.DecoderInjector = &ValidatingAdmission{}
-
 // ValidatingAdmission validates ResourceInterpreterCustomization object when creating/updating.
 type ValidatingAdmission struct {
 	client.Client
-	decoder *admission.Decoder
+	Decoder admission.Decoder
 }
+
+// Check if our ValidatingAdmission implements necessary interface
+var _ admission.Handler = &ValidatingAdmission{}
 
 // Handle implements admission.Handler interface.
 // It yields a response to an AdmissionRequest.
 func (v *ValidatingAdmission) Handle(ctx context.Context, req admission.Request) admission.Response {
 	configuration := &configv1alpha1.ResourceInterpreterCustomization{}
 
-	err := v.decoder.Decode(req, configuration)
+	err := v.Decoder.Decode(req, configuration)
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
@@ -39,11 +54,4 @@ func (v *ValidatingAdmission) Handle(ctx context.Context, req admission.Request)
 		return admission.Denied(err.Error())
 	}
 	return admission.Allowed("")
-}
-
-// InjectDecoder implements admission.DecoderInjector interface.
-// A decoder will be automatically injected.
-func (v *ValidatingAdmission) InjectDecoder(decoder *admission.Decoder) error {
-	v.decoder = decoder
-	return nil
 }

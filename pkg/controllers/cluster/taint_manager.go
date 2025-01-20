@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package cluster
 
 import (
@@ -16,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
+	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/features"
 	"github.com/karmada-io/karmada/pkg/util"
@@ -23,7 +40,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
 
-// TaintManagerName is the controller name that will be used for taint management.
+// TaintManagerName is the controller name that will be used when reporting events and metrics.
 const TaintManagerName = "taint-manager"
 
 // NoExecuteTaintManager listens to Taint/Toleration changes and is responsible for removing objects
@@ -51,7 +68,7 @@ func (tc *NoExecuteTaintManager) Reconcile(ctx context.Context, req reconcile.Re
 		if apierrors.IsNotFound(err) {
 			return controllerruntime.Result{}, nil
 		}
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	// Check whether the target cluster has no execute taints.
@@ -69,7 +86,7 @@ func (tc *NoExecuteTaintManager) syncCluster(ctx context.Context, cluster *clust
 		Selector: fields.OneTermEqualSelector(rbClusterKeyIndex, cluster.Name),
 	}); err != nil {
 		klog.ErrorS(err, "Failed to list ResourceBindings", "cluster", cluster.Name)
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 	for i := range rbList.Items {
 		key, err := keys.FederatedKeyFunc(cluster.Name, &rbList.Items[i])
@@ -86,7 +103,7 @@ func (tc *NoExecuteTaintManager) syncCluster(ctx context.Context, cluster *clust
 		Selector: fields.OneTermEqualSelector(crbClusterKeyIndex, cluster.Name),
 	}); err != nil {
 		klog.ErrorS(err, "Failed to list ClusterResourceBindings", "cluster", cluster.Name)
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 	for i := range crbList.Items {
 		key, err := keys.FederatedKeyFunc(cluster.Name, &crbList.Items[i])
@@ -128,6 +145,8 @@ func (tc *NoExecuteTaintManager) syncBindingEviction(key util.QueueKey) error {
 		return fmt.Errorf("invalid key")
 	}
 	cluster := fedKey.Cluster
+	klog.V(4).Infof("Begin to sync ResourceBinding(%s) with taintManager for Cluster(%s)",
+		fedKey.ClusterWideKey.NamespaceKey(), cluster)
 
 	binding := &workv1alpha2.ResourceBinding{}
 	if err := tc.Client.Get(context.TODO(), types.NamespacedName{Namespace: fedKey.Namespace, Name: fedKey.Name}, binding); err != nil {
@@ -154,18 +173,23 @@ func (tc *NoExecuteTaintManager) syncBindingEviction(key util.QueueKey) error {
 	if needEviction || tolerationTime == 0 {
 		// update final result to evict the target cluster
 		if features.FeatureGate.Enabled(features.GracefulEviction) {
-			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager), workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated)))
+			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
+				workv1alpha2.WithPurgeMode(policyv1alpha1.Graciously),
+				workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
+				workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated)))
 		} else {
-			binding.Spec.RemoveCluster(cluster)
+			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
+				workv1alpha2.WithPurgeMode(policyv1alpha1.Immediately),
+				workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
+				workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated)))
 		}
 		if err = tc.Update(context.TODO(), binding); err != nil {
 			helper.EmitClusterEvictionEventForResourceBinding(binding, cluster, tc.EventRecorder, err)
 			klog.ErrorS(err, "Failed to update binding", "binding", klog.KObj(binding))
 			return err
 		}
-		if !features.FeatureGate.Enabled(features.GracefulEviction) {
-			helper.EmitClusterEvictionEventForResourceBinding(binding, cluster, tc.EventRecorder, nil)
-		}
+		klog.V(2).Infof("Success to evict Cluster(%s) from ResourceBinding(%s) schedule result",
+			fedKey.ClusterWideKey.NamespaceKey(), fedKey.Cluster)
 	} else if tolerationTime > 0 {
 		tc.bindingEvictionWorker.AddAfter(fedKey, tolerationTime)
 	}
@@ -180,6 +204,8 @@ func (tc *NoExecuteTaintManager) syncClusterBindingEviction(key util.QueueKey) e
 		return fmt.Errorf("invalid key")
 	}
 	cluster := fedKey.Cluster
+	klog.V(4).Infof("Begin to sync ClusterResourceBinding(%s) with taintManager for Cluster(%s)",
+		fedKey.ClusterWideKey.NamespaceKey(), cluster)
 
 	binding := &workv1alpha2.ClusterResourceBinding{}
 	if err := tc.Client.Get(context.TODO(), types.NamespacedName{Name: fedKey.Name}, binding); err != nil {
@@ -206,18 +232,23 @@ func (tc *NoExecuteTaintManager) syncClusterBindingEviction(key util.QueueKey) e
 	if needEviction || tolerationTime == 0 {
 		// update final result to evict the target cluster
 		if features.FeatureGate.Enabled(features.GracefulEviction) {
-			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager), workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated)))
+			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
+				workv1alpha2.WithPurgeMode(policyv1alpha1.Graciously),
+				workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
+				workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated)))
 		} else {
-			binding.Spec.RemoveCluster(cluster)
+			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
+				workv1alpha2.WithPurgeMode(policyv1alpha1.Immediately),
+				workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
+				workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated)))
 		}
 		if err = tc.Update(context.TODO(), binding); err != nil {
 			helper.EmitClusterEvictionEventForClusterResourceBinding(binding, cluster, tc.EventRecorder, err)
 			klog.ErrorS(err, "Failed to update cluster binding", "binding", binding.Name)
 			return err
 		}
-		if !features.FeatureGate.Enabled(features.GracefulEviction) {
-			helper.EmitClusterEvictionEventForClusterResourceBinding(binding, cluster, tc.EventRecorder, nil)
-		}
+		klog.V(2).Infof("Success to evict Cluster(%s) from ClusterResourceBinding(%s) schedule result",
+			fedKey.ClusterWideKey.NamespaceKey(), fedKey.Cluster)
 	} else if tolerationTime > 0 {
 		tc.clusterBindingEvictionWorker.AddAfter(fedKey, tolerationTime)
 		return nil
@@ -229,10 +260,16 @@ func (tc *NoExecuteTaintManager) syncClusterBindingEviction(key util.QueueKey) e
 // needEviction returns whether the binding should be evicted from target cluster right now.
 // If a toleration time is found, we return false along with a minimum toleration time as the
 // second return value.
-func (tc *NoExecuteTaintManager) needEviction(clusterName string, appliedPlacement map[string]string) (bool, time.Duration, error) {
-	placement, err := helper.GetAppliedPlacement(appliedPlacement)
+func (tc *NoExecuteTaintManager) needEviction(clusterName string, annotations map[string]string) (bool, time.Duration, error) {
+	placement, err := helper.GetAppliedPlacement(annotations)
 	if err != nil {
 		return false, -1, err
+	}
+	// Under normal circumstances, placement will not be empty,
+	// but when the default scheduler is not used, coordination problems may occur.
+	// Therefore, in order to make the method more robust, add the empty judgement.
+	if placement == nil {
+		return false, -1, fmt.Errorf("the applied placement for ResourceBining can not be empty")
 	}
 
 	cluster := &clusterv1alpha1.Cluster{}
@@ -261,7 +298,7 @@ func (tc *NoExecuteTaintManager) needEviction(clusterName string, appliedPlaceme
 // SetupWithManager creates a controller and register to controller manager.
 func (tc *NoExecuteTaintManager) SetupWithManager(mgr controllerruntime.Manager) error {
 	return utilerrors.NewAggregate([]error{
-		controllerruntime.NewControllerManagedBy(mgr).For(&clusterv1alpha1.Cluster{}).Complete(tc),
+		controllerruntime.NewControllerManagedBy(mgr).Named(TaintManagerName).For(&clusterv1alpha1.Cluster{}).Complete(tc),
 		mgr.Add(tc),
 	})
 }

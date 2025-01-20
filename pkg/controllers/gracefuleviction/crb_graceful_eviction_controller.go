@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package gracefuleviction
 
 import (
@@ -21,7 +37,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
 
-// CRBGracefulEvictionControllerName is the controller name that will be used when reporting events.
+// CRBGracefulEvictionControllerName is the controller name that will be used when reporting events and metrics.
 const CRBGracefulEvictionControllerName = "cluster-resource-binding-graceful-eviction-controller"
 
 // CRBGracefulEvictionController is to sync ClusterResourceBinding.spec.gracefulEvictionTasks.
@@ -43,16 +59,16 @@ func (c *CRBGracefulEvictionController) Reconcile(ctx context.Context, req contr
 		if apierrors.IsNotFound(err) {
 			return controllerruntime.Result{}, nil
 		}
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	if !binding.DeletionTimestamp.IsZero() {
 		return controllerruntime.Result{}, nil
 	}
 
-	retryDuration, err := c.syncBinding(binding)
+	retryDuration, err := c.syncBinding(ctx, binding)
 	if err != nil {
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 	if retryDuration > 0 {
 		klog.V(4).Infof("Retry to evict task after %v minutes.", retryDuration.Minutes())
@@ -61,7 +77,7 @@ func (c *CRBGracefulEvictionController) Reconcile(ctx context.Context, req contr
 	return controllerruntime.Result{}, nil
 }
 
-func (c *CRBGracefulEvictionController) syncBinding(binding *workv1alpha2.ClusterResourceBinding) (time.Duration, error) {
+func (c *CRBGracefulEvictionController) syncBinding(ctx context.Context, binding *workv1alpha2.ClusterResourceBinding) (time.Duration, error) {
 	keptTask, evictedClusters := assessEvictionTasks(binding.Spec, binding.Status.AggregatedStatus, c.GracefulEvictionTimeout, metav1.Now())
 	if reflect.DeepEqual(binding.Spec.GracefulEvictionTasks, keptTask) {
 		return nextRetry(keptTask, c.GracefulEvictionTimeout, metav1.Now().Time), nil
@@ -70,12 +86,14 @@ func (c *CRBGracefulEvictionController) syncBinding(binding *workv1alpha2.Cluste
 	objPatch := client.MergeFrom(binding)
 	modifiedObj := binding.DeepCopy()
 	modifiedObj.Spec.GracefulEvictionTasks = keptTask
-	err := c.Client.Patch(context.TODO(), modifiedObj, objPatch)
+	err := c.Client.Patch(ctx, modifiedObj, objPatch)
 	if err != nil {
 		return 0, err
 	}
 
 	for _, cluster := range evictedClusters {
+		klog.V(2).Infof("Success to evict Cluster(%s) from ClusterResourceBinding(%s) gracefulEvictionTasks",
+			cluster, binding.Name)
 		helper.EmitClusterEvictionEventForClusterResourceBinding(binding, cluster, c.EventRecorder, err)
 	}
 	return nextRetry(keptTask, c.GracefulEvictionTimeout, metav1.Now().Time), nil
@@ -102,12 +120,13 @@ func (c *CRBGracefulEvictionController) SetupWithManager(mgr controllerruntime.M
 
 			return newObj.Status.SchedulerObservedGeneration == newObj.Generation
 		},
-		DeleteFunc:  func(deleteEvent event.DeleteEvent) bool { return false },
-		GenericFunc: func(genericEvent event.GenericEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
 
 	return controllerruntime.NewControllerManagedBy(mgr).
+		Named(CRBGracefulEvictionControllerName).
 		For(&workv1alpha2.ClusterResourceBinding{}, builder.WithPredicates(clusterResourceBindingPredicateFn)).
-		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter(c.RateLimiterOptions)}).
+		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](c.RateLimiterOptions)}).
 		Complete(c)
 }

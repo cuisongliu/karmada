@@ -1,3 +1,19 @@
+/*
+Copyright 2023 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package tasks
 
 import (
@@ -10,6 +26,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
 
+	operatorv1alpha1 "github.com/karmada-io/karmada/operator/pkg/apis/operator/v1alpha1"
 	"github.com/karmada-io/karmada/operator/pkg/certs"
 	"github.com/karmada-io/karmada/operator/pkg/constants"
 	"github.com/karmada-io/karmada/operator/pkg/util"
@@ -54,7 +71,6 @@ func runUploadAdminKubeconfig(r workflow.RunData) error {
 	case corev1.ServiceTypeClusterIP:
 		apiserverName := util.KarmadaAPIServerName(data.GetName())
 		endpoint = fmt.Sprintf("https://%s.%s.svc.cluster.local:%d", apiserverName, data.GetNamespace(), constants.KarmadaAPIserverListenClientPort)
-
 	case corev1.ServiceTypeNodePort:
 		service, err := apiclient.GetService(data.RemoteClient(), util.KarmadaAPIServerName(data.GetName()), data.GetNamespace())
 		if err != nil {
@@ -62,6 +78,21 @@ func runUploadAdminKubeconfig(r workflow.RunData) error {
 		}
 		nodePort := getNodePortFromAPIServerService(service)
 		endpoint = fmt.Sprintf("https://%s:%d", data.ControlplaneAddress(), nodePort)
+	case corev1.ServiceTypeLoadBalancer:
+		service, err := apiclient.GetService(data.RemoteClient(), util.KarmadaAPIServerName(data.GetName()), data.GetNamespace())
+		if err != nil {
+			return err
+		}
+		if len(service.Status.LoadBalancer.Ingress) == 0 {
+			return fmt.Errorf("no loadbalancer ingress found in service (%s/%s)", data.GetName(), data.GetNamespace())
+		}
+		loadbalancerAddress := getLoadbalancerAddress(service.Status.LoadBalancer.Ingress)
+		if loadbalancerAddress == "" {
+			return fmt.Errorf("can not find loadbalancer ip or hostname in service (%s/%s)", data.GetName(), data.GetNamespace())
+		}
+		endpoint = fmt.Sprintf("https://%s:%d", loadbalancerAddress, constants.KarmadaAPIserverListenClientPort)
+	default:
+		return errors.New("not supported service type for Karmada API server")
 	}
 
 	kubeconfig, err := buildKubeConfigFromSpec(data, endpoint)
@@ -80,7 +111,7 @@ func runUploadAdminKubeconfig(r workflow.RunData) error {
 			Name:      util.AdminKubeconfigSecretName(data.GetName()),
 			Labels:    constants.KarmadaOperatorLabel,
 		},
-		Data: map[string][]byte{"config": configBytes},
+		Data: map[string][]byte{"kubeconfig": configBytes},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create secret of kubeconfig, err: %w", err)
@@ -111,6 +142,17 @@ func getNodePortFromAPIServerService(service *corev1.Service) int32 {
 	return nodePort
 }
 
+func getLoadbalancerAddress(ingress []corev1.LoadBalancerIngress) string {
+	for _, in := range ingress {
+		if in.Hostname != "" {
+			return in.Hostname
+		} else if in.IP != "" {
+			return in.IP
+		}
+	}
+	return ""
+}
+
 func buildKubeConfigFromSpec(data InitData, serverURL string) (*clientcmdapi.Config, error) {
 	ca := data.GetCert(constants.CaCertAndKeyName)
 	if ca == nil {
@@ -138,25 +180,29 @@ func buildKubeConfigFromSpec(data InitData, serverURL string) (*clientcmdapi.Con
 }
 
 // NewUploadCertsTask init a Upload-Certs task
-func NewUploadCertsTask() workflow.Task {
+func NewUploadCertsTask(karmada *operatorv1alpha1.Karmada) workflow.Task {
+	tasks := []workflow.Task{
+		{
+			Name: "Upload-KarmadaCert",
+			Run:  runUploadKarmadaCert,
+		},
+		{
+			Name: "Upload-WebHookCert",
+			Run:  runUploadWebHookCert,
+		},
+	}
+	if karmada.Spec.Components.Etcd.Local != nil {
+		uploadEtcdTask := workflow.Task{
+			Name: "Upload-EtcdCert",
+			Run:  runUploadEtcdCert,
+		}
+		tasks = append(tasks, uploadEtcdTask)
+	}
 	return workflow.Task{
 		Name:        "Upload-Certs",
 		Run:         runUploadCerts,
 		RunSubTasks: true,
-		Tasks: []workflow.Task{
-			{
-				Name: "Upload-KarmadaCert",
-				Run:  runUploadKarmadaCert,
-			},
-			{
-				Name: "Upload-EtcdCert",
-				Run:  runUploadEtcdCert,
-			},
-			{
-				Name: "Upload-WebHookCert",
-				Run:  runUploadWebHookCert,
-			},
-		},
+		Tasks:       tasks,
 	}
 }
 
@@ -168,7 +214,7 @@ func runUploadCerts(r workflow.RunData) error {
 	klog.V(4).InfoS("[upload-certs] Running upload-certs task", "karmada", klog.KObj(data))
 
 	if len(data.CertList()) == 0 {
-		return errors.New("there is no certs in store, please reload crets to store")
+		return errors.New("there is no certs in store, please reload certs to store")
 	}
 	return nil
 }
